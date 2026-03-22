@@ -1,0 +1,16 @@
+import streamlit as st
+from ie_modules_v2.m01_workbook_loader import load_current_state_steps
+from ie_modules_v2.m02_nlp_normalization import normalize_steps
+from ie_modules_v2.m03_ie_ontology import map_steps_to_ie_ontology
+from ie_modules_v2.m04_rule_engine import apply_rule_engine
+
+st.title("9 Lean Rule Engine")
+if "uploaded_excel" not in st.session_state:
+    st.warning("Upload the workbook in Home first.")
+    st.stop()
+
+steps = load_current_state_steps(st.session_state["uploaded_excel"])
+normalized = normalize_steps(steps)
+ontology = map_steps_to_ie_ontology(normalized)
+ruled = apply_rule_engine(ontology)
+st.dataframe(ruled, use_container_width=True)
