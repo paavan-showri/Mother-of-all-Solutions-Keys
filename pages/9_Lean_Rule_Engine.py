@@ -11,7 +11,8 @@ st.title("9 Lean Rule Engine")
 
 ctx = require_workbook()
 steps = load_current_state_steps(ctx["excel_file"], sheet_name=ctx["sheet_name"])
-normalized = normalize_steps(steps)
+enable_transformers = st.toggle("Enable Hugging Face zero-shot classifier", value=False)
+normalized = normalize_steps(steps, enable_transformers=enable_transformers)
 ontology = map_steps_to_ie_ontology(normalized)
 ruled = apply_rule_engine(ontology)
 

@@ -10,7 +10,8 @@ st.title("7 NLP Normalization")
 
 ctx = require_workbook()
 steps = load_current_state_steps(ctx["excel_file"], sheet_name=ctx["sheet_name"])
-normalized = normalize_steps(steps)
+enable_transformers = st.toggle("Enable Hugging Face zero-shot classifier", value=False)
+normalized = normalize_steps(steps, enable_transformers=enable_transformers)
 df = pd.DataFrame([vars(x) for x in normalized])
 
 st.dataframe(df, use_container_width=True)

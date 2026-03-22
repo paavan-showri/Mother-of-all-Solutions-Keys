@@ -27,14 +27,14 @@ def solve_rcpsp(tasks: List[Task], capacities: Dict[str, int]) -> pd.DataFrame:
             model.Add(starts[task.task_id] >= ends[pred])
 
     for resource, cap in capacities.items():
-        using_tasks = [t for t in tasks if resource in t.resources]
-        if not using_tasks:
+        using = [t for t in tasks if resource in t.resources]
+        if not using:
             continue
-        ivals = [intervals[t.task_id] for t in using_tasks]
-        if cap == 1:
+        ivals = [intervals[t.task_id] for t in using]
+        if cap <= 1:
             model.AddNoOverlap(ivals)
         else:
-            model.AddCumulative(ivals, [1] * len(ivals), cap)
+            model.AddCumulative(ivals, [1] * len(ivals), int(cap))
 
     makespan = model.NewIntVar(0, horizon, "makespan")
     for task in tasks:
@@ -42,6 +42,7 @@ def solve_rcpsp(tasks: List[Task], capacities: Dict[str, int]) -> pd.DataFrame:
     model.Minimize(makespan)
 
     solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 20.0
     status = solver.Solve(model)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         raise RuntimeError("No feasible RCPSP solution found.")
@@ -58,6 +59,6 @@ def solve_rcpsp(tasks: List[Task], capacities: Dict[str, int]) -> pd.DataFrame:
             "Resources": ", ".join(task.resources),
             "Internal/External": task.internal_external,
         })
-    out = pd.DataFrame(rows)
-    out.attrs["makespan"] = solver.Value(makespan)
-    return out
+    df = pd.DataFrame(rows)
+    df.attrs["makespan"] = solver.Value(makespan)
+    return df

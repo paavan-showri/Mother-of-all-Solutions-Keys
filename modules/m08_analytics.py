@@ -17,9 +17,17 @@ def build_analytics(
     current_makespan = max((s.end_sec or 0) for s in steps) if steps else 0
     optimized_makespan = int(optimized_schedule.attrs.get("makespan", 0))
     improvement_sec = current_makespan - optimized_makespan
-    improvement_pct = (improvement_sec / current_makespan * 100) if current_makespan else 0.0
+    improvement_pct = (improvement_sec / current_makespan * 100.0) if current_makespan else 0.0
 
-    waste_summary = ontology_df.groupby(["ie_class", "waste_class"], dropna=False)["duration_sec"].sum().reset_index()
+    exploded = ontology_df.copy()
+    if "waste_labels" in exploded.columns:
+        exploded = exploded.explode("waste_labels")
+    waste_summary = (
+        exploded.groupby(["lean_bucket", "ie_class", "waste_labels"], dropna=False)["duration_sec"]
+        .sum()
+        .reset_index()
+        .sort_values("duration_sec", ascending=False)
+    )
 
     total_makespan = max(optimized_makespan, 1)
     util_rows = []
@@ -29,10 +37,10 @@ def build_analytics(
             "resource": resource,
             "capacity": cap,
             "busy_sec": busy,
-            "utilization_pct": round(100 * busy / total_makespan / cap, 2),
+            "utilization_pct": round(100.0 * busy / total_makespan / max(cap, 1), 2),
         })
-    util_df = pd.DataFrame(util_rows).sort_values("utilization_pct", ascending=False)
-    bottleneck = util_df.iloc[0].to_dict() if not util_df.empty else {}
+    resource_util = pd.DataFrame(util_rows).sort_values("utilization_pct", ascending=False)
+    bottleneck = resource_util.iloc[0].to_dict() if not resource_util.empty else {}
 
     comparison = pd.DataFrame([
         {"metric": "Current makespan (sec)", "value": current_makespan},
@@ -43,7 +51,7 @@ def build_analytics(
 
     return {
         "waste_summary": waste_summary,
-        "resource_utilization": util_df,
+        "resource_utilization": resource_util,
         "bottleneck": bottleneck,
         "comparison": comparison,
     }
