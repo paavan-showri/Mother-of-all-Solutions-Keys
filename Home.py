@@ -74,14 +74,14 @@ st.markdown(
     - Activity Type
     - Resources
 
-    ### Expected precedence-network headers
+    ### Expected precedence headers
     - Task ID
     - Task Name
     - Duration
     - Immediate Predecessors
     - Resources
 
-    ### Expected resource-sheet headers
+    ### Expected resource headers
     - Resource
     - Capacity
     """
