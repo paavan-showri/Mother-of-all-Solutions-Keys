@@ -16,7 +16,7 @@ REQUIRED_FPC_HEADERS = [
     "Activity",
     "Start time",
     "End time",
-    "Duration (Sec)",
+    "Duration",
     "Activity Type",
     "Resources",
 ]
@@ -125,7 +125,7 @@ def load_current_state_steps(file, sheet_name: str = DEFAULT_FPC_SHEET) -> List[
             activity=str(row["Activity"]).strip(),
             start_sec=to_sec(row["Start time"]),
             end_sec=to_sec(row["End time"]),
-            duration_sec=to_sec(row["Duration (Sec)"]) or 0,
+            duration_sec=to_sec(row["Duration"]) or 0,
             activity_type=str(row["Activity Type"]).strip(),
             resources=parse_resources(row["Resources"]),
         ))
