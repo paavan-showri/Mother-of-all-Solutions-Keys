@@ -35,7 +35,7 @@ def load_resource_data(file_bytes, sheet_name):
         "Activity",
         "Start time",
         "End time",
-        "Duration",
+        "Duration (Sec)",
         "Resources",
     ]
     missing = [c for c in needed_cols if c not in df.columns]
@@ -113,11 +113,11 @@ def make_resource_chart(df):
 
     df["StartSec"] = df["Start time"].apply(to_seconds)
     df["EndSec"] = df["End time"].apply(to_seconds)
-    df["DurationSec"] = df["Duration"].apply(to_seconds)
+    df["DurationSec"] = df["Duration (Sec)"].apply(to_seconds)
 
     mask_bad = df["DurationSec"].isna()
     if mask_bad.any():
-        numeric_duration = pd.to_numeric(df.loc[mask_bad, "Duration"], errors="coerce")
+        numeric_duration = pd.to_numeric(df.loc[mask_bad, "Duration (Sec)"], errors="coerce")
         df.loc[mask_bad, "DurationSec"] = numeric_duration
 
     df.loc[df["DurationSec"].isna(), "DurationSec"] = df["EndSec"] - df["StartSec"]
