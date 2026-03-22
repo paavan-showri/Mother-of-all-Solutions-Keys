@@ -70,8 +70,19 @@ st.markdown(
     - Activity
     - Start time
     - End time
-    - Duration
+    - Duration (Sec)
     - Activity Type
     - Resources
+
+    ### Expected precedence-network headers
+    - Task ID
+    - Task Name
+    - Duration
+    - Immediate Predecessors
+    - Resources
+
+    ### Expected resource-sheet headers
+    - Resource
+    - Capacity
     """
 )
