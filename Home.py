@@ -29,60 +29,68 @@ if uploaded_file is not None:
         st.session_state["excel_sheet_names"] = xls.sheet_names
         st.success(f"Loaded file: {uploaded_file.name}")
         st.write("Detected sheets:", xls.sheet_names)
-    except Exception as e:
+
+        missing = [
+            name for name in [sheet_name, precedence_sheet, resource_sheet]
+            if name not in xls.sheet_names
+        ]
+        if missing:
+            st.warning(f"These expected sheets were not found: {missing}")
+    except Exception as e:  # noqa: BLE001
         st.error(f"File uploaded, but workbook could not be read: {e}")
 else:
     st.info("Please upload your Excel file.")
 
 if "excel_file_name" in st.session_state:
     st.write(f"Current file: **{st.session_state['excel_file_name']}**")
-
 if "sheet_name" in st.session_state:
     st.write(f"Current current-state sheet: **{st.session_state['sheet_name']}**")
-
 if "precedence_sheet" in st.session_state:
     st.write(f"Current precedence sheet: **{st.session_state['precedence_sheet']}**")
-
 if "resource_sheet" in st.session_state:
     st.write(f"Current resource sheet: **{st.session_state['resource_sheet']}**")
 
 st.markdown(
     """
-    ### Pages
-    Use the left sidebar to open:
-    - Resource Utilization
-    - Impact vs Effort
-    - Pareto Frequency
-    - Pareto Total Time
-    - Scatter Plot
-    - Waste Analysis
-    - NLP Normalization
-    - IE Ontology
-    - Lean Rule Engine
-    - Macro Tasks
-    - Precedence Network
-    - RCPSP Schedule
-    - Analytics
+### Pages
+Use the left sidebar to open:
+- Resource Utilization
+- Impact vs Effort
+- Pareto Frequency
+- Pareto Total Time
+- Scatter Plot
+- Waste Analysis
+- NLP Normalization
+- IE Ontology
+- Lean Rule Engine
+- Macro Tasks
+- Precedence Network
+- RCPSP Schedule
+- Analytics
 
-    ### Expected current-state headers
-    - Step
-    - Description
-    - Activity
-    - Start time
-    - End time
-    - Duration (Sec)
-    - Activity Type
-    - Resources
+### Expected current-state worksheet headers
+- Step
+- Description
+- Activity
+- Start time
+- End time
+- Duration (Sec)
+- Activity Type
+- Resources
 
-    ### Expected precedence headers
-    - Task ID
-    - Task Name
-    - Duration
-    - Immediate Predecessors
-    - Resources
+### Expected precedence worksheet headers
+- Task ID
+- Task Name
+- Duration
+- Immediate Predecessors
+- Resources
 
-    ### Expected resource headers
-    - Resource
-    - Capacity
-    """
+### Expected resources worksheet headers
+- Resource
+- Capacity
+
+### Notes
+- The precedence loader uses the first **Task ID** column if your worksheet accidentally contains a duplicate Task ID column.
+- Blank or malformed spillover rows at the bottom of the precedence sheet are ignored when possible.
+"""
 )
