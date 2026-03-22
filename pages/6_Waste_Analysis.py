@@ -84,7 +84,7 @@ def contains_keyword(text, keywords):
 
 
 def find_header_row(raw_df):
-    required_headers = {"Step", "Description", "Activity", "Duration (Sec)"}
+    required_headers = {"Step", "Description", "Activity", "Duration"}
     for i, row in raw_df.iterrows():
         row_values = {normalize_text(v) for v in row.tolist() if pd.notna(v)}
         if required_headers.issubset(row_values):
@@ -196,7 +196,7 @@ def load_fpc_table(excel_bytes_data, selected_sheet):
     if header_row is None:
         raise ValueError(
             "Could not find the Flow Process Chart table. Required headers: "
-            "Step, Description, Activity, Duration (Sec)."
+            "Step, Description, Activity, Duration."
         )
 
     bio = io.BytesIO(excel_bytes_data)
@@ -205,7 +205,7 @@ def load_fpc_table(excel_bytes_data, selected_sheet):
 
     df = df.loc[:, ~df.columns.str.contains("^Unnamed", na=False)].copy()
 
-    required_cols = ["Step", "Description", "Activity", "Duration (Sec)"]
+    required_cols = ["Step", "Description", "Activity", "Duration"]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
@@ -213,7 +213,7 @@ def load_fpc_table(excel_bytes_data, selected_sheet):
     df = df.dropna(subset=["Description"]).copy()
     df["Description"] = df["Description"].astype(str).str.strip()
     df["Activity"] = df["Activity"].astype(str).str.strip().str.upper()
-    df["Duration_sec"] = df["Duration (Sec)"].apply(duration_to_seconds)
+    df["Duration_sec"] = df["Duration"].apply(duration_to_seconds)
 
     if "VA / NVA / NNVA" in df.columns:
         df["VA / NVA / NNVA"] = df["VA / NVA / NNVA"].astype(str).str.strip().str.upper()
