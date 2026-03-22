@@ -51,7 +51,7 @@ def solve_rcpsp(tasks: List[Task], capacities: Dict[str, int]) -> pd.DataFrame:
         rows.append({
             "Task ID": task.task_id,
             "Task Name": task.name,
-            "Duration (sec)": task.duration_sec,
+            "Duration": task.duration_sec,
             "Start (sec)": solver.Value(starts[task.task_id]),
             "End (sec)": solver.Value(ends[task.task_id]),
             "Immediate Predecessors": task.predecessors,
