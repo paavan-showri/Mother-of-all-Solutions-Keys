@@ -1,5 +1,8 @@
 streamlit
 pandas
 openpyxl
+matplotlib
+numpy
+plotly
 networkx
 ortools
