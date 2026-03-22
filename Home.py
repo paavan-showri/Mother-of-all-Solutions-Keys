@@ -70,7 +70,7 @@ st.markdown(
     - Activity
     - Start time
     - End time
-    - Duration (Sec)
+    - Duration
     - Activity Type
     - Resources
     """
