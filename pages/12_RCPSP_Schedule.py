@@ -8,12 +8,14 @@ st.set_page_config(page_title="RCPSP Schedule", layout="wide")
 st.title("12 RCPSP Schedule")
 
 ctx = require_workbook()
-tasks = load_precedence_tasks(ctx["excel_file"], sheet_name=ctx["precedence_sheet"])
 
-ctx = require_workbook()
-capacities = load_resource_capacities(ctx["excel_file"], sheet_name=ctx["resource_sheet"])
+try:
+    tasks = load_precedence_tasks(ctx["excel_file"], sheet_name=ctx["precedence_sheet"])
+    capacities = load_resource_capacities(ctx["excel_file"], sheet_name=ctx["resource_sheet"])
+    schedule = solve_rcpsp(tasks, capacities)
+except Exception as e:  # noqa: BLE001
+    st.error(f"Could not build the RCPSP schedule: {e}")
+    st.stop()
 
-schedule = solve_rcpsp(tasks, capacities)
-
-st.write("Makespan (sec):", schedule.attrs["makespan"])
+st.write("Makespan (sec):", schedule.attrs.get("makespan"))
 st.dataframe(schedule, use_container_width=True)

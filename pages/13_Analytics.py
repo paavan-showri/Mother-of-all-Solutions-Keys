@@ -11,16 +11,17 @@ st.set_page_config(page_title="Analytics", layout="wide")
 st.title("13 Analytics")
 
 ctx = require_workbook()
-steps = load_current_state_steps(ctx["excel_file"], sheet_name=ctx["sheet_name"])
 
-ctx = require_workbook()
-ontology = map_steps_to_ie_ontology(normalize_steps(steps))
-tasks = load_precedence_tasks(ctx["excel_file"], sheet_name=ctx["precedence_sheet"])
-
-ctx = require_workbook()
-capacities = load_resource_capacities(ctx["excel_file"], sheet_name=ctx["resource_sheet"])
-schedule = solve_rcpsp(tasks, capacities)
-analytics = build_analytics(steps, ontology, tasks, capacities, schedule)
+try:
+    steps = load_current_state_steps(ctx["excel_file"], sheet_name=ctx["sheet_name"])
+    ontology = map_steps_to_ie_ontology(normalize_steps(steps))
+    tasks = load_precedence_tasks(ctx["excel_file"], sheet_name=ctx["precedence_sheet"])
+    capacities = load_resource_capacities(ctx["excel_file"], sheet_name=ctx["resource_sheet"])
+    schedule = solve_rcpsp(tasks, capacities)
+    analytics = build_analytics(steps, ontology, tasks, capacities, schedule)
+except Exception as e:  # noqa: BLE001
+    st.error(f"Could not compute analytics: {e}")
+    st.stop()
 
 st.subheader("Comparison")
 st.dataframe(analytics["comparison"], use_container_width=True)
