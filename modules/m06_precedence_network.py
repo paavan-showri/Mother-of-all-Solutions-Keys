@@ -14,8 +14,8 @@ def build_precedence_outputs(tasks: List[Task]) -> Dict[str, object]:
     missing_preds = sorted({pred for t in tasks for pred in t.predecessors if pred not in task_ids})
     if missing_preds:
         raise ValueError(
-            "Undefined predecessor Task IDs found in precedence data: "
-            f"{missing_preds}. Every predecessor in 'Immediate Predecessors' must also exist in 'Task ID'."
+            f"These predecessor IDs do not exist in Task ID: {missing_preds}. "
+            f"Fix the 'Immediate Predecessors' column in the precedence sheet."
         )
 
     g = nx.DiGraph()
@@ -24,7 +24,6 @@ def build_precedence_outputs(tasks: List[Task]) -> Dict[str, object]:
     for t in tasks:
         for pred in t.predecessors:
             g.add_edge(pred, t.task_id)
-
     if not nx.is_directed_acyclic_graph(g):
         raise ValueError("Precedence network is not a DAG.")
 
@@ -33,13 +32,11 @@ def build_precedence_outputs(tasks: List[Task]) -> Dict[str, object]:
     longest: Dict[int, int] = {n: 0 for n in topo}
     parent: Dict[int, int | None] = {n: None for n in topo}
     for n in topo:
-        base = node_duration[n]
         for succ in g.successors(n):
-            cand = longest[n] + base
+            cand = longest[n] + node_duration[n]
             if cand > longest[succ]:
                 longest[succ] = cand
                 parent[succ] = n
-
     end_node = max(topo, key=lambda n: longest[n] + node_duration[n]) if topo else None
     critical_path = []
     while end_node is not None:
@@ -47,25 +44,28 @@ def build_precedence_outputs(tasks: List[Task]) -> Dict[str, object]:
         end_node = parent[end_node]
     critical_path = list(reversed(critical_path))
 
-    tech_edges = pd.DataFrame(
-        [{"predecessor": u, "successor": v} for u, v in g.edges()]
-    )
+    tech_edges = pd.DataFrame([
+        {"predecessor": u, "successor": v} for u, v in g.edges()
+    ])
 
     resource_conflicts = []
     parallelizable = []
-    for a, b in combinations(tasks, 2):
-        shared = sorted(set(a.resources) & set(b.resources))
-        comparable = nx.has_path(g, a.task_id, b.task_id) or nx.has_path(g, b.task_id, a.task_id)
-        if shared:
-            resource_conflicts.append(
-                {"task_a": a.task_id, "task_b": b.task_id, "shared_resources": ", ".join(shared)}
-            )
-        if not shared and not comparable:
-            parallelizable.append({"task_a": a.task_id, "task_b": b.task_id})
+    for i, a in enumerate(tasks):
+        for b in tasks[i + 1:]:
+            shared = sorted(set(a.resources) & set(b.resources))
+            comparable = nx.has_path(g, a.task_id, b.task_id) or nx.has_path(g, b.task_id, a.task_id)
+            if shared:
+                resource_conflicts.append({
+                    "task_a": a.task_id, "task_b": b.task_id, "shared_resources": ", ".join(shared)
+                })
+            if not shared and not comparable:
+                parallelizable.append({
+                    "task_a": a.task_id, "task_b": b.task_id
+                })
 
     return {
         "graph": g,
-        "technological_precedence": pd.DataFrame(tech_edges),
+        "technological_precedence": tech_edges,
         "resource_linked_conflicts": pd.DataFrame(resource_conflicts),
         "parallelizable_tasks": pd.DataFrame(parallelizable),
         "critical_path_task_ids": critical_path,
