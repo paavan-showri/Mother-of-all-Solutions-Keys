@@ -97,14 +97,14 @@ def load_full_data(file_bytes, sheet_name):
         df["Activity Type"] = ""
     if "Resources" not in df.columns:
         df["Resources"] = ""
-    if "Duration (Sec)" not in df.columns:
-        df["Duration (Sec)"] = 0
+    if "Duration" not in df.columns:
+        df["Duration"] = 0
 
     df["Activity"] = df["Activity"].astype(str).str.strip().str.upper()
     df["Description"] = df["Description"].astype(str).str.strip()
     df["Activity Type"] = df["Activity Type"].astype(str).str.strip().str.upper()
     df["Resources"] = df["Resources"].astype(str).str.strip()
-    df["Duration Seconds"] = df["Duration (Sec)"].apply(to_duration_seconds).fillna(0.0)
+    df["Duration Seconds"] = df["Duration"].apply(to_duration_seconds).fillna(0.0)
     df["Resource Count"] = df["Resources"].apply(resource_count)
     return df.reset_index(drop=True)
 
@@ -381,7 +381,7 @@ st.markdown(
 **Classification logic used in this chart**
 
 - The code is aligned to the logic in your `excel-impact-effort.csv` file.
-- It uses **Description + Activity + Activity Type + Duration (Sec) + Resources** together.
+- It uses **Description + Activity + Activity Type + Duration + Resources** together.
 - **Impact** is driven mainly by whether the motion is an **effective therblig** or an **ineffective/non-value-added therblig**.
 - The **Activity** column is explicitly considered. Inspection, delay/waiting, storage, and decision rows are treated as low-impact by default because they are Lean wastes or non-value-added support work.
 - For handling / motion rows, the code uses the description to decide whether the step is a useful motion like **grasp, move, release, use** or a waste motion like **walk, search, reposition, turn back, inspect, wait**.
