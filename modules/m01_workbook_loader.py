@@ -20,6 +20,8 @@ REQUIRED_FPC_HEADERS = [
     "Activity Type",
     "Resources",
 ]
+
+# Explicitly use the precedence-network worksheet headers requested by the user.
 REQUIRED_PRECEDENCE_HEADERS = [
     "Task ID",
     "Task Name",
@@ -27,6 +29,7 @@ REQUIRED_PRECEDENCE_HEADERS = [
     "Immediate Predecessors",
     "Resources",
 ]
+
 REQUIRED_RESOURCE_HEADERS = ["Resource", "Capacity"]
 
 
@@ -52,12 +55,27 @@ class Task:
     internal_external: str = "internal"
 
 
-def _find_header_row(raw: pd.DataFrame) -> int:
+def _normalize_headers(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def _find_fpc_header_row(raw: pd.DataFrame) -> int:
     for i in range(len(raw)):
         vals = [str(x).strip() for x in raw.iloc[i].tolist() if pd.notna(x)]
         if all(h in vals for h in ["Step", "Description", "Activity", "Resources"]):
             return i
     raise ValueError("Could not find the Flow Process Chart header row.")
+
+
+def _find_exact_header_row(raw: pd.DataFrame, required_headers: List[str]) -> int:
+    required = {h.strip() for h in required_headers}
+    for i in range(len(raw)):
+        vals = {str(x).strip() for x in raw.iloc[i].tolist() if pd.notna(x)}
+        if required.issubset(vals):
+            return i
+    raise ValueError(f"Could not find a header row containing: {required_headers}")
 
 
 def to_sec(value) -> Optional[int]:
@@ -71,9 +89,12 @@ def to_sec(value) -> Optional[int]:
     m = re.match(r"^(\d+):(\d{1,2})(?::(\d{1,2}))?$", text)
     if m:
         if m.group(3) is None:
-            mm = int(m.group(1)); ss = int(m.group(2))
+            mm = int(m.group(1))
+            ss = int(m.group(2))
             return mm * 60 + ss
-        hh = int(m.group(1)); mm = int(m.group(2)); ss = int(m.group(3))
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        ss = int(m.group(3))
         return hh * 3600 + mm * 60 + ss
     return None
 
@@ -89,24 +110,28 @@ def parse_predecessors(value) -> List[int]:
     if pd.isna(value):
         return []
     text = str(value).strip()
-    if text in {"—", "-", "None", "none", ""}:
+    if text in {"—", "-", "None", "none", "", "nan"}:
         return []
     nums = re.findall(r"\d+", text)
-    if "," in text and nums:
-        return [int(n) for n in nums]
-    if text.isdigit() and len(text) == 5 and text.endswith("100"):
-        return [int(text[:2]), int(text[2:])]
-    if nums:
-        return [int(n) for n in nums]
-    return []
+    return [int(n) for n in nums] if nums else []
+
+
+def _parse_task_id(value) -> int:
+    if pd.isna(value):
+        raise ValueError("Task ID cannot be blank.")
+    text = str(value).strip()
+    nums = re.findall(r"\d+", text)
+    if not nums:
+        raise ValueError(f"Could not parse Task ID from value: {value}")
+    return int(nums[0])
 
 
 def load_current_state_df(file, sheet_name: str = DEFAULT_FPC_SHEET) -> pd.DataFrame:
     raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
-    header_row = _find_header_row(raw)
+    header_row = _find_fpc_header_row(raw)
     file.seek(0)
     df = pd.read_excel(file, sheet_name=sheet_name, header=header_row)
-    df.columns = [str(c).strip() for c in df.columns]
+    df = _normalize_headers(df)
     missing = [c for c in REQUIRED_FPC_HEADERS if c not in df.columns]
     if missing:
         raise KeyError(f"Missing required headers in {sheet_name}: {missing}")
@@ -119,50 +144,76 @@ def load_current_state_steps(file, sheet_name: str = DEFAULT_FPC_SHEET) -> List[
     for _, row in df.iterrows():
         if pd.isna(row["Step"]):
             continue
-        steps.append(FPCStep(
-            step=int(row["Step"]),
-            description=str(row["Description"]).strip(),
-            activity=str(row["Activity"]).strip(),
-            start_sec=to_sec(row["Start time"]),
-            end_sec=to_sec(row["End time"]),
-            duration_sec=to_sec(row["Duration (Sec)"]) or 0,
-            activity_type=str(row["Activity Type"]).strip(),
-            resources=parse_resources(row["Resources"]),
-        ))
+        steps.append(
+            FPCStep(
+                step=int(row["Step"]),
+                description=str(row["Description"]).strip(),
+                activity=str(row["Activity"]).strip(),
+                start_sec=to_sec(row["Start time"]),
+                end_sec=to_sec(row["End time"]),
+                duration_sec=to_sec(row["Duration (Sec)"]) or 0,
+                activity_type=str(row["Activity Type"]).strip(),
+                resources=parse_resources(row["Resources"]),
+            )
+        )
     return steps
 
 
 def load_precedence_tasks(file, sheet_name: str = DEFAULT_PRECEDENCE_SHEET) -> List[Task]:
+    # Read raw first so the loader still works even if users keep title rows above the table.
     file.seek(0)
-    df = pd.read_excel(file, sheet_name=sheet_name)
-    df.columns = [str(c).strip() for c in df.columns]
+    raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
+    header_row = _find_exact_header_row(raw, REQUIRED_PRECEDENCE_HEADERS)
+
+    file.seek(0)
+    df = pd.read_excel(file, sheet_name=sheet_name, header=header_row)
+    df = _normalize_headers(df)
+
     missing = [c for c in REQUIRED_PRECEDENCE_HEADERS if c not in df.columns]
     if missing:
         raise KeyError(f"Missing required headers in {sheet_name}: {missing}")
+
     tasks: List[Task] = []
     for _, row in df.iterrows():
         if pd.isna(row["Task ID"]):
             continue
+
         name = str(row["Task Name"]).strip()
-        tasks.append(Task(
-            task_id=int(row["Task ID"]),
-            name=name,
-            duration_sec=to_sec(row["Duration"]) or 0,
-            predecessors=parse_predecessors(row["Immediate Predecessors"]),
-            resources=parse_resources(row["Resources"]),
-            internal_external="external" if name in {"Get butter", "Get knife", "Cut butter"} else "internal",
-        ))
+        task_resources = parse_resources(row["Resources"])
+        task_id = _parse_task_id(row["Task ID"])
+
+        tasks.append(
+            Task(
+                task_id=task_id,
+                name=name,
+                duration_sec=to_sec(row["Duration"]) or 0,
+                predecessors=parse_predecessors(row["Immediate Predecessors"]),
+                resources=task_resources,
+                internal_external=(
+                    "external"
+                    if name.lower() in {"get butter", "get knife", "cut butter"}
+                    else "internal"
+                ),
+            )
+        )
     return tasks
 
 
 def load_resource_capacities(file, sheet_name: str = DEFAULT_RESOURCE_SHEET) -> Dict[str, int]:
     file.seek(0)
-    df = pd.read_excel(file, sheet_name=sheet_name)
-    df.columns = [str(c).strip() for c in df.columns]
+    raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
+    header_row = _find_exact_header_row(raw, REQUIRED_RESOURCE_HEADERS)
+
+    file.seek(0)
+    df = pd.read_excel(file, sheet_name=sheet_name, header=header_row)
+    df = _normalize_headers(df)
+
     missing = [c for c in REQUIRED_RESOURCE_HEADERS if c not in df.columns]
     if missing:
         raise KeyError(f"Missing required headers in {sheet_name}: {missing}")
+
     return {
         str(row["Resource"]).strip().title(): int(row["Capacity"])
-        for _, row in df.iterrows() if pd.notna(row["Resource"])
+        for _, row in df.iterrows()
+        if pd.notna(row["Resource"])
     }
