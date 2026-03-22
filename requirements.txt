@@ -1,8 +1,8 @@
 streamlit
 pandas
-openpyxl
 matplotlib
-numpy
 plotly
+openpyxl
+numpy
 networkx
 ortools
