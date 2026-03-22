@@ -1,13 +1,14 @@
 import streamlit as st
-from ie_modules_v2.m01_workbook_loader import load_precedence_tasks
-from ie_modules_v2.m06_precedence_network import build_precedence_outputs
 
+from session_utils import require_workbook
+from modules.m01_workbook_loader import load_precedence_tasks
+from modules.m06_precedence_network import build_precedence_outputs
+
+st.set_page_config(page_title="Precedence Network", layout="wide")
 st.title("11 Precedence Network")
-if "uploaded_excel" not in st.session_state:
-    st.warning("Upload the workbook in Home first.")
-    st.stop()
 
-tasks = load_precedence_tasks(st.session_state["uploaded_excel"])
+ctx = require_workbook()
+tasks = load_precedence_tasks(ctx["excel_file"], sheet_name=ctx["precedence_sheet"])
 outputs = build_precedence_outputs(tasks)
 
 st.subheader("Technological precedence")

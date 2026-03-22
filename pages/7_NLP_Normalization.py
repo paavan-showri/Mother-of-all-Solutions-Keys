@@ -1,14 +1,16 @@
-import streamlit as st
 import pandas as pd
-from ie_modules_v2.m01_workbook_loader import load_current_state_steps
-from ie_modules_v2.m02_nlp_normalization import normalize_steps
+import streamlit as st
 
+from session_utils import require_workbook
+from modules.m01_workbook_loader import load_current_state_steps
+from modules.m02_nlp_normalization import normalize_steps
+
+st.set_page_config(page_title="NLP Normalization", layout="wide")
 st.title("7 NLP Normalization")
-if "uploaded_excel" not in st.session_state:
-    st.warning("Upload the workbook in Home first.")
-    st.stop()
 
-steps = load_current_state_steps(st.session_state["uploaded_excel"])
+ctx = require_workbook()
+steps = load_current_state_steps(ctx["excel_file"], sheet_name=ctx["sheet_name"])
 normalized = normalize_steps(steps)
 df = pd.DataFrame([vars(x) for x in normalized])
+
 st.dataframe(df, use_container_width=True)
