@@ -13,14 +13,14 @@ resource_sheet = st.text_input("Resources sheet name", value="Resources")
 
 if uploaded_file is not None:
     file_bytes = uploaded_file.getvalue()
-    st.session_state['excel_file_bytes'] = file_bytes
-    st.session_state['excel_file_name'] = uploaded_file.name
-    st.session_state['sheet_name'] = sheet_name
-    st.session_state['precedence_sheet'] = precedence_sheet
-    st.session_state['resource_sheet'] = resource_sheet
+    st.session_state["excel_file_bytes"] = file_bytes
+    st.session_state["excel_file_name"] = uploaded_file.name
+    st.session_state["sheet_name"] = sheet_name
+    st.session_state["precedence_sheet"] = precedence_sheet
+    st.session_state["resource_sheet"] = resource_sheet
     try:
         xls = pd.ExcelFile(io.BytesIO(file_bytes))
-        st.session_state['excel_sheet_names'] = xls.sheet_names
+        st.session_state["excel_sheet_names"] = xls.sheet_names
         st.success(f"Loaded file: {uploaded_file.name}")
         st.write("Detected sheets:", xls.sheet_names)
     except Exception as e:
@@ -28,10 +28,11 @@ if uploaded_file is not None:
 else:
     st.info("Please upload your Excel file.")
 
-if 'excel_file_name' in st.session_state:
-    st.write(f"Current file: **{st.session_state['excel_file_name']}**")
+if "excel_file_name" in st.session_state:
+    st.write(f'Current file: **{st.session_state["excel_file_name"]}**')
 
-st.markdown("""
+st.markdown(
+    """
 ### Pipeline
 1. Waste Analysis
 2. NLP Normalization
@@ -42,9 +43,14 @@ st.markdown("""
 7. RCPSP Schedule
 8. Analytics
 
+### Future-state modes
+- **Automatic discovery mode**: current-state NLP → ontology/rules → macro tasks → RCPSP
+- **Planner template mode**: fixed planner-style future-state durations for comparison
+
 ### NLP stack
 - ManufactuBERT semantic hints (optional)
 - Zero-shot waste classification (optional)
 - Manufacturing ontology and Lean rules
 - OR-Tools RCPSP scheduler
-""")
+"""
+)

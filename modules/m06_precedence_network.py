@@ -10,49 +10,56 @@ from .m01_workbook_loader import Task
 
 def build_precedence_outputs(tasks: List[Task]) -> Dict[str, object]:
     g = nx.DiGraph()
-    for t in tasks:
-        g.add_node(t.task_id, name=t.name, duration_sec=t.duration_sec, resources=t.resources)
-    ids = {t.task_id for t in tasks}
-    for t in tasks:
-        for pred in t.predecessors:
+    for task in tasks:
+        g.add_node(task.task_id, name=task.name, duration_sec=task.duration_sec, resources=task.resources)
+
+    ids = {task.task_id for task in tasks}
+    for task in tasks:
+        for pred in task.predecessors:
             if pred not in ids:
-                raise ValueError(f'Predecessor {pred} is not present in task list.')
-            g.add_edge(pred, t.task_id)
+                raise ValueError(f"Predecessor {pred} is not present in task list.")
+            g.add_edge(pred, task.task_id)
+
     if not nx.is_directed_acyclic_graph(g):
-        raise ValueError('Precedence network is not a DAG.')
+        raise ValueError("Precedence network is not a DAG.")
 
     topo = list(nx.topological_sort(g))
     longest = {n: 0 for n in topo}
     parent = {n: None for n in topo}
-    dur = {t.task_id: t.duration_sec for t in tasks}
-    for n in topo:
-        for succ in g.successors(n):
-            cand = longest[n] + dur[n]
-            if cand > longest[succ]:
-                longest[succ] = cand
-                parent[succ] = n
-    end_node = max(topo, key=lambda n: longest[n] + dur[n]) if topo else None
-    cp = []
-    while end_node is not None:
-        cp.append(end_node)
-        end_node = parent[end_node]
-    cp = list(reversed(cp))
+    durations = {t.task_id: t.duration_sec for t in tasks}
 
-    tech = pd.DataFrame([{'predecessor': u, 'successor': v} for u, v in g.edges()])
+    for node in topo:
+        for succ in g.successors(node):
+            candidate = longest[node] + durations[node]
+            if candidate > longest[succ]:
+                longest[succ] = candidate
+                parent[succ] = node
+
+    end_node = max(topo, key=lambda n: longest[n] + durations[n]) if topo else None
+    critical_path = []
+    while end_node is not None:
+        critical_path.append(end_node)
+        end_node = parent[end_node]
+    critical_path = list(reversed(critical_path))
+
+    tech = pd.DataFrame([{"predecessor": u, "successor": v} for u, v in g.edges()])
     conflicts = []
     parallel = []
-    for i, a in enumerate(tasks):
-        for b in tasks[i + 1:]:
-            shared = sorted(set(a.resources) & set(b.resources))
-            linked = nx.has_path(g, a.task_id, b.task_id) or nx.has_path(g, b.task_id, a.task_id)
+    for i, task_a in enumerate(tasks):
+        for task_b in tasks[i + 1 :]:
+            shared = sorted(set(task_a.resources) & set(task_b.resources))
+            linked = nx.has_path(g, task_a.task_id, task_b.task_id) or nx.has_path(g, task_b.task_id, task_a.task_id)
             if shared:
-                conflicts.append({'task_a': a.task_id, 'task_b': b.task_id, 'shared_resources': ', '.join(shared)})
+                conflicts.append(
+                    {"task_a": task_a.task_id, "task_b": task_b.task_id, "shared_resources": ", ".join(shared)}
+                )
             if not linked and not shared:
-                parallel.append({'task_a': a.task_id, 'task_b': b.task_id})
+                parallel.append({"task_a": task_a.task_id, "task_b": task_b.task_id})
+
     return {
-        'graph': g,
-        'technological_precedence': tech,
-        'resource_linked_conflicts': pd.DataFrame(conflicts),
-        'parallelizable_tasks': pd.DataFrame(parallel),
-        'critical_path_task_ids': cp,
+        "graph": g,
+        "technological_precedence": tech,
+        "resource_linked_conflicts": pd.DataFrame(conflicts),
+        "parallelizable_tasks": pd.DataFrame(parallel),
+        "critical_path_task_ids": critical_path,
     }
