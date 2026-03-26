@@ -3,94 +3,48 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Case Study Charts", layout="wide")
-
 st.title("Case Study Chart Generator")
 st.write("Upload the Excel workbook once, then open any page from the left sidebar.")
 
-uploaded_file = st.file_uploader(
-    "Upload Excel file",
-    type=["xlsx", "xls", "xlsm"]
-)
-
+uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls", "xlsm"])
 sheet_name = st.text_input("Current-state sheet name", value="FPC_Current State")
 precedence_sheet = st.text_input("Precedence sheet name", value="Precedence Network")
-resource_sheet = st.text_input("Resource sheet name", value="Resources")
+resource_sheet = st.text_input("Resources sheet name", value="Resources")
 
 if uploaded_file is not None:
     file_bytes = uploaded_file.getvalue()
-    st.session_state["excel_file_bytes"] = file_bytes
-    st.session_state["excel_file_name"] = uploaded_file.name
-    st.session_state["sheet_name"] = sheet_name
-    st.session_state["precedence_sheet"] = precedence_sheet
-    st.session_state["resource_sheet"] = resource_sheet
-
+    st.session_state['excel_file_bytes'] = file_bytes
+    st.session_state['excel_file_name'] = uploaded_file.name
+    st.session_state['sheet_name'] = sheet_name
+    st.session_state['precedence_sheet'] = precedence_sheet
+    st.session_state['resource_sheet'] = resource_sheet
     try:
         xls = pd.ExcelFile(io.BytesIO(file_bytes))
-        st.session_state["excel_sheet_names"] = xls.sheet_names
+        st.session_state['excel_sheet_names'] = xls.sheet_names
         st.success(f"Loaded file: {uploaded_file.name}")
         st.write("Detected sheets:", xls.sheet_names)
-
-        missing = [
-            name for name in [sheet_name, precedence_sheet, resource_sheet]
-            if name not in xls.sheet_names
-        ]
-        if missing:
-            st.warning(f"These expected sheets were not found: {missing}")
-    except Exception as e:  # noqa: BLE001
-        st.error(f"File uploaded, but workbook could not be read: {e}")
+    except Exception as e:
+        st.error(f"Workbook could not be read: {e}")
 else:
     st.info("Please upload your Excel file.")
 
-if "excel_file_name" in st.session_state:
+if 'excel_file_name' in st.session_state:
     st.write(f"Current file: **{st.session_state['excel_file_name']}**")
-if "sheet_name" in st.session_state:
-    st.write(f"Current current-state sheet: **{st.session_state['sheet_name']}**")
-if "precedence_sheet" in st.session_state:
-    st.write(f"Current precedence sheet: **{st.session_state['precedence_sheet']}**")
-if "resource_sheet" in st.session_state:
-    st.write(f"Current resource sheet: **{st.session_state['resource_sheet']}**")
 
-st.markdown(
-    """
-### Pages
-Use the left sidebar to open:
-- Resource Utilization
-- Impact vs Effort
-- Pareto Frequency
-- Pareto Total Time
-- Scatter Plot
-- Waste Analysis
-- NLP Normalization
-- IE Ontology
-- Lean Rule Engine
-- Macro Tasks
-- Precedence Network
-- RCPSP Schedule
-- Analytics
+st.markdown("""
+### Pipeline
+1. Waste Analysis
+2. NLP Normalization
+3. IE Ontology
+4. Lean Rule Engine
+5. Macro Tasks
+6. Precedence Network
+7. RCPSP Schedule
+8. Analytics
 
-### Expected current-state worksheet headers
-- Step
-- Description
-- Activity
-- Start time
-- End time
-- Duration (Sec)
-- Activity Type
-- Resources
-
-### Expected precedence worksheet headers
-- Task ID
-- Task Name
-- Duration
-- Immediate Predecessors
-- Resources
-
-### Expected resources worksheet headers
-- Resource
-- Capacity
-
-### Notes
-- The precedence loader uses the first **Task ID** column if your worksheet accidentally contains a duplicate Task ID column.
-- Blank or malformed spillover rows at the bottom of the precedence sheet are ignored when possible.
-"""
-)
+### NLP stack
+- ManufactuBERT semantic hints (optional)
+- Zero-shot waste classification (optional)
+- Manufacturing ontology and Lean rules
+- OR-Tools RCPSP scheduler
+""")

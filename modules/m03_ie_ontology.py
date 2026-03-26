@@ -1,107 +1,59 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Dict, List
+from typing import List
 
 import pandas as pd
 
 from .m02_nlp_normalization import NormalizedStep
 
-ACTIVITY_TO_IE_CLASS = {
-    "search": "retrieval_search",
-    "wait": "delay",
-    "inspect": "inspection",
-    "move": "transport_motion",
-    "retrieve": "retrieval",
-    "handle": "handling",
-    "start_machine": "machine_start",
-    "process": "machine_run",
-    "load_unload": "load_unload",
-    "cut": "transformation",
-    "apply": "transformation",
-    "assemble": "assembly",
-    "serve": "delivery",
-    "rework": "rework",
-    "other": "other",
+ACTION_TO_IE = {
+    'search': 'search', 'move': 'transport_motion', 'retrieve': 'retrieval', 'handle': 'handling',
+    'wait': 'delay', 'inspect': 'inspection', 'start_machine': 'machine_start', 'process': 'machine_run',
+    'cut': 'transformation', 'apply': 'transformation', 'assemble': 'assembly', 'serve': 'delivery', 'other': 'other'
 }
 
-LEAN_WASTE_BY_ACTIVITY = {
-    "W": ["waiting"],
-    "I": ["extra_processing"],
-    "S": ["inventory"],
-    "D": ["non_utilized_talent"],
-    "M": ["motion"],
-    "T": ["transportation"],
-    "O": ["value_added_operation"],
+WASTE_TO_LEAN = {
+    'Waiting': 'NVA', 'Motion': 'NVA', 'Transportation': 'NVA', 'Inspection': 'NNVA',
+    'Extra Processing': 'NVA', 'Defects': 'NVA', 'Inventory': 'NVA', 'Overproduction': 'NVA',
+    'Non-Utilized Talent': 'NVA', 'Setup': 'NNVA', 'Handling': 'NNVA'
 }
 
 
-def _combine_labels(*label_lists: List[str]) -> List[str]:
-    seen = []
-    for labels in label_lists:
-        for label in labels:
-            if label and label not in seen:
-                seen.append(label)
-    return seen
+def _internal_external(row) -> str:
+    if row['machine_related'] and row['action'] in {'start_machine', 'process'}:
+        return 'internal'
+    if row['obj'] in {'butter', 'knife'} or row['location'] in {'drawer', 'refrigerator'}:
+        return 'external'
+    if row['action'] in {'retrieve', 'search', 'move'} and not row['machine_related']:
+        return 'external'
+    return 'internal'
 
 
-def _derive_resource_role(row: Dict[str, object]) -> str:
-    if row.get("machine"):
-        return "equipment"
-    if row.get("tool"):
-        return "tool"
-    if row.get("material"):
-        return "material"
-    if row.get("product"):
-        return "product"
-    return "personnel_or_other"
-
-
-def _derive_smed_bucket(row: Dict[str, object]) -> str:
-    action = row.get("action")
-    machine = row.get("machine")
-    if action in {"wait", "inspect", "process", "start_machine", "load_unload"} or machine:
-        return "internal"
-    if action in {"retrieve", "search", "move", "handle"}:
-        return "external"
-    return "review"
-
-
-def _derive_lean_bucket(row: Dict[str, object], waste_labels: List[str]) -> str:
-    activity_type = str(row.get("activity_type", "")).upper()
-    if activity_type == "VA":
-        return "VA"
-    if activity_type == "NNVA":
-        return "NNVA"
-    if activity_type == "NVA":
-        return "NVA"
-    if "value_added_operation" in waste_labels:
-        return "VA"
-    if any(x in waste_labels for x in ["waiting", "motion", "transportation", "inventory", "extra_processing", "defects", "overproduction", "non_utilized_talent"]):
-        return "NVA"
-    return "NNVA"
+def _stage_group(row) -> str:
+    text = row['raw_description'].lower()
+    if row['action'] in {'retrieve', 'search'} and any(k in text for k in ['bread', 'plate']):
+        return 'material_prep'
+    if row['action'] in {'handle'} and 'plate' in text and 'bread' in text:
+        return 'material_prep'
+    if row['action'] in {'start_machine', 'process'} or 'toaster' in text:
+        return 'machine_cycle'
+    if any(k in text for k in ['butter', 'knife']):
+        return 'butter_prep'
+    if 'toast' in text and any(k in text for k in ['stack', 'cut', 'serve', 'wife']):
+        return 'finishing'
+    return 'other'
 
 
 def map_steps_to_ie_ontology(normalized_steps: List[NormalizedStep]) -> pd.DataFrame:
     rows = []
     for s in normalized_steps:
         row = asdict(s)
-        ie_class = ACTIVITY_TO_IE_CLASS.get(s.action, "other")
-        activity_waste = LEAN_WASTE_BY_ACTIVITY.get(str(s.activity).upper(), [])
-        waste_labels = _combine_labels(activity_waste, s.waste_hints, s.classifier_labels)
-        row["ie_class"] = ie_class
-        row["waste_labels"] = waste_labels
-        row["primary_waste_label"] = waste_labels[0] if waste_labels else "unclassified"
-        row["resource_role"] = _derive_resource_role(row)
-        row["smed_bucket"] = _derive_smed_bucket(row)
-        row["lean_bucket"] = _derive_lean_bucket(row, waste_labels)
-        row["manufacturing_stage"] = (
-            "machine_run" if ie_class in {"machine_run", "machine_start", "load_unload"}
-            else "quality" if ie_class == "inspection"
-            else "material_tool_prep" if ie_class in {"retrieval", "retrieval_search", "handling", "transport_motion"}
-            else "transformation" if ie_class in {"transformation", "assembly", "delivery"}
-            else "other"
-        )
-        row["machine_or_station"] = row.get("machine") or row.get("location")
+        row['ie_class'] = ACTION_TO_IE.get(s.action, 'other')
+        row['lean_bucket'] = WASTE_TO_LEAN.get(s.waste_pred, s.va_flag or '')
+        row['internal_external'] = _internal_external(row)
+        row['stage_group'] = _stage_group(row)
+        row['resource_role'] = 'machine' if s.machine_related else ('tool' if s.tools else ('material' if s.materials else 'labor'))
+        row['bottleneck_candidate'] = s.machine_related or s.delay_signal
         rows.append(row)
     return pd.DataFrame(rows)
