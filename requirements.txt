@@ -6,6 +6,3 @@ openpyxl
 numpy
 networkx
 ortools
-transformers
-torch
-spacy

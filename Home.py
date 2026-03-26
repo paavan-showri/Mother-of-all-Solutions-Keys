@@ -1,9 +1,10 @@
 import io
+
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Case Study Charts", layout="wide")
-st.title("Case Study Chart Generator")
+st.set_page_config(page_title="Case Study", layout="wide")
+st.title("Case Study")
 st.write("Upload the Excel workbook once, then open any page from the left sidebar.")
 
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls", "xlsm"])
@@ -23,8 +24,8 @@ if uploaded_file is not None:
         st.session_state["excel_sheet_names"] = xls.sheet_names
         st.success(f"Loaded file: {uploaded_file.name}")
         st.write("Detected sheets:", xls.sheet_names)
-    except Exception as e:
-        st.error(f"Workbook could not be read: {e}")
+    except Exception as exc:
+        st.error(f"Workbook could not be read: {exc}")
 else:
     st.info("Please upload your Excel file.")
 
@@ -34,23 +35,22 @@ if "excel_file_name" in st.session_state:
 st.markdown(
     """
 ### Pipeline
-1. Waste Analysis
-2. NLP Normalization
-3. IE Ontology
-4. Lean Rule Engine
-5. Macro Tasks
-6. Precedence Network
-7. RCPSP Schedule
-8. Analytics
+- Waste Analysis
+- NLP Normalization
+- IE Ontology
+- Lean Rule Engine
+- Macro Tasks
+- Precedence Network
+- RCPSP Schedule
+- Analytics
 
-### Future-state modes
-- **Automatic discovery mode**: current-state NLP → ontology/rules → macro tasks → RCPSP
-- **Planner template mode**: fixed planner-style future-state durations for comparison
+### Future-state discovery
+Current-state workbook → NLP normalization → IE ontology → Lean rules → automatic macro-task discovery → inferred precedence → RCPSP
 
-### NLP stack
-- ManufactuBERT semantic hints (optional)
-- Zero-shot waste classification (optional)
-- Manufacturing ontology and Lean rules
-- OR-Tools RCPSP scheduler
+### Notes
+- No ManufactuBERT
+- No hard-coded planner template mode
+- No fixed duration dictionary
+- No fixed predecessor dictionary
 """
 )

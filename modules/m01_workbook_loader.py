@@ -41,6 +41,10 @@ class Task:
     predecessors: List[int] = field(default_factory=list)
     resources: List[str] = field(default_factory=list)
     internal_external: str = "internal"
+    source_steps: List[int] = field(default_factory=list)
+    stage_group: str = "other"
+    action_family: str = "other"
+    order_key: int = 0
 
 
 def _clean_cell(value) -> str:
@@ -50,10 +54,7 @@ def _clean_cell(value) -> str:
 
 
 def _normalize_headers(cols) -> List[str]:
-    out = []
-    for c in cols:
-        out.append(_clean_cell(c))
-    return out
+    return [_clean_cell(c) for c in cols]
 
 
 def _ensure_sheet_exists(file, sheet_name: str) -> None:
@@ -86,8 +87,10 @@ def _read_table_with_detected_header(file, sheet_name: str, required_headers: Li
 def to_sec(value) -> Optional[int]:
     if pd.isna(value):
         return None
-    if hasattr(value, 'hour') and hasattr(value, 'minute') and hasattr(value, 'second'):
+    if hasattr(value, "hour") and hasattr(value, "minute") and hasattr(value, "second"):
         return int(value.hour) * 3600 + int(value.minute) * 60 + int(value.second)
+    if isinstance(value, pd.Timedelta):
+        return int(round(value.total_seconds()))
     if isinstance(value, (int, float)) and not pd.isna(value):
         v = float(value)
         if 0 < v < 1:
@@ -125,7 +128,7 @@ def parse_predecessors(value) -> List[int]:
     if pd.isna(value):
         return []
     text = str(value).strip()
-    if text in {'—', '-', 'None', 'none', '', 'nan'}:
+    if text in {"—", "-", "None", "none", "", "nan"}:
         return []
     return [int(n) for n in re.findall(r"\d+", text)]
 
@@ -138,19 +141,22 @@ def load_current_state_steps(file, sheet_name: str = DEFAULT_FPC_SHEET) -> List[
     df = load_current_state_df(file, sheet_name)
     steps = []
     for _, row in df.iterrows():
-        if pd.isna(row.get('Step')):
+        if pd.isna(row.get("Step")):
             continue
-        steps.append(FPCStep(
-            step=int(row['Step']),
-            description=_clean_cell(row['Description']),
-            activity=_clean_cell(row['Activity']).upper(),
-            start_sec=to_sec(row.get('Start time')),
-            end_sec=to_sec(row.get('End time')),
-            duration_sec=to_sec(row.get('Duration (Sec)')) or 0,
-            activity_type=_clean_cell(row.get('Activity Type', row.get('VA / NVA / NNVA', ''))),
-            resources=parse_resources(row.get('Resources')),
-            va_flag=_clean_cell(row.get('VA / NVA / NNVA', '')),
-        ))
+        duration_sec = to_sec(row.get("Duration (Sec)")) or 0
+        steps.append(
+            FPCStep(
+                step=int(row["Step"]),
+                description=_clean_cell(row["Description"]),
+                activity=_clean_cell(row["Activity"]).upper(),
+                start_sec=to_sec(row.get("Start time")),
+                end_sec=to_sec(row.get("End time")),
+                duration_sec=duration_sec,
+                activity_type=_clean_cell(row.get("Activity Type", row.get("VA / NVA / NNVA", ""))),
+                resources=parse_resources(row.get("Resources")),
+                va_flag=_clean_cell(row.get("VA / NVA / NNVA", row.get("Activity Type", ""))),
+            )
+        )
     return steps
 
 
@@ -158,29 +164,31 @@ def load_precedence_tasks(file, sheet_name: str = DEFAULT_PRECEDENCE_SHEET) -> L
     df = _read_table_with_detected_header(file, sheet_name, REQUIRED_PRECEDENCE_HEADERS)
     tasks = []
     for _, row in df.iterrows():
-        task_id = _parse_task_id(row.get('Task ID'))
+        task_id = _parse_task_id(row.get("Task ID"))
         if task_id is None:
             continue
-        tasks.append(Task(
-            task_id=task_id,
-            name=_clean_cell(row.get('Task Name')),
-            duration_sec=to_sec(row.get('Duration')) or 0,
-            predecessors=parse_predecessors(row.get('Immediate Predecessors')),
-            resources=parse_resources(row.get('Resources')),
-            internal_external=_clean_cell(row.get('Type', 'internal')) or 'internal',
-        ))
+        tasks.append(
+            Task(
+                task_id=task_id,
+                name=_clean_cell(row.get("Task Name")),
+                duration_sec=to_sec(row.get("Duration")) or 0,
+                predecessors=parse_predecessors(row.get("Immediate Predecessors")),
+                resources=parse_resources(row.get("Resources")),
+                internal_external=_clean_cell(row.get("Type", "internal")) or "internal",
+            )
+        )
     return tasks
 
 
 def load_resource_capacities(file, sheet_name: str = DEFAULT_RESOURCE_SHEET) -> Dict[str, int]:
     df = _read_table_with_detected_header(file, sheet_name, REQUIRED_RESOURCE_HEADERS)
-    out = {}
+    out: Dict[str, int] = {}
     for _, row in df.iterrows():
-        name = _clean_cell(row.get('Resource'))
+        name = _clean_cell(row.get("Resource"))
         if not name:
             continue
         try:
-            cap = int(float(row.get('Capacity', 1)))
+            cap = int(float(row.get("Capacity", 1)))
         except Exception:
             cap = 1
         out[name.title()] = max(cap, 1)
