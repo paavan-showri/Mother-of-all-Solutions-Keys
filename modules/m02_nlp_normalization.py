@@ -50,17 +50,16 @@ ACTION_PATTERNS: List[Tuple[str, str]] = [
     (r"\b(search|look\s+for|locate|find)\b", "search"),
     (r"\b(wait|idle)\b", "wait"),
     (r"\b(inspect|check|verify|monitor)\b", "inspect"),
-    (r"\b(decide|react|complain|reject)\b", "cognitive"),
-    (r"\b(tell|inform|serve|deliver)\b", "communicate"),
     (r"\b(turn\s+on|start|activate)\b", "start_machine"),
     (r"\b(run|process|toast|heat)\b", "process"),
     (r"\b(cut|slice|trim)\b", "cut"),
     (r"\b(butter|spread|apply|coat)\b", "apply"),
     (r"\b(stack|assemble|press|flip)\b", "assemble"),
+    (r"\b(tell|inform|serve|deliver)\b", "communicate"),
+    (r"\b(decide|react|complain|reject)\b", "cognitive"),
     (r"\b(walk|move|carry|transport|bring|go\s+to|return|turn\s+back|turn\s+around|reach)\b", "move"),
     (r"\b(grasp|pick|collect|retrieve|get|take|fetch|hold)\b", "retrieve"),
     (r"\b(open|close|position|place|drop|adjust|set)\b", "handle"),
-]
 ]
 
 PHRASE_OBJECTS: List[Tuple[str, str]] = [
