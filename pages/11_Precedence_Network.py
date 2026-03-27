@@ -73,7 +73,7 @@ ys = [y for _, y in pos.values()] or [0]
 span_x = max(levels) - min(levels) if levels else 0
 span_y = max(ys) - min(ys) if ys else 0
 fig_w = max(22, 8 + span_x * 0.34)
-fig_h = max(12, 6 + span_y * 0.44)
+fig_h = max(12, 6 + span_y * 2)
 fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=180)
 
 normal_edges = [e for e in graph.edges() if e not in cp_edges]
