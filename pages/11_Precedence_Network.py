@@ -52,7 +52,7 @@ def build_layered_positions(graph: nx.DiGraph):
 pos = build_layered_positions(graph)
 label_width = 14 if graph.number_of_nodes() <= 18 else 11
 labels = {
-    n: "\n".join(textwrap.wrap(graph.nodes[n]["name"], width=label_width)[:3])
+    n: "\n".join(textwrap.wrap(str(graph.nodes[n].get("name", n)), width=label_width)[:3])
     for n in graph.nodes()
 }
 cp_nodes = set(outputs["critical_path_task_ids"])

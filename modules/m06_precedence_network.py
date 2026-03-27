@@ -12,7 +12,7 @@ def _transitive_reduce_safe(graph: nx.DiGraph) -> nx.DiGraph:
     if graph.number_of_nodes() == 0:
         return graph.copy()
     try:
-        return nx.transitive_reduction(graph)
+        reduced = nx.transitive_reduction(graph)
     except Exception:
         reduced = graph.copy()
         for u, v in list(graph.edges()):
@@ -21,7 +21,11 @@ def _transitive_reduce_safe(graph: nx.DiGraph) -> nx.DiGraph:
                 test.remove_edge(u, v)
             if nx.has_path(test, u, v):
                 reduced.remove_edge(u, v)
-        return reduced
+    # Preserve node attributes because networkx.transitive_reduction returns bare nodes.
+    for node, attrs in graph.nodes(data=True):
+        if node in reduced:
+            reduced.nodes[node].update(attrs)
+    return reduced
 
 
 def build_precedence_outputs(tasks: List[Task]) -> Dict[str, object]:
