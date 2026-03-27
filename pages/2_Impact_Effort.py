@@ -380,7 +380,6 @@ st.markdown(
     """
 **Classification logic used in this chart**
 
-- The code is aligned to the logic in your `excel-impact-effort.csv` file.
 - It uses **Description + Activity + Activity Type + Duration (Sec) + Resources** together.
 - **Impact** is driven mainly by whether the motion is an **effective therblig** or an **ineffective/non-value-added therblig**.
 - The **Activity** column is explicitly considered. Inspection, delay/waiting, storage, and decision rows are treated as low-impact by default because they are Lean wastes or non-value-added support work.
