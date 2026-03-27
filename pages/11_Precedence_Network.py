@@ -48,19 +48,19 @@ with top3:
 
 controls = st.columns(8)
 with controls[0]:
-    chart_height = st.slider("Chart height", min_value=650, max_value=1800, value=1000, step=50)
+    chart_height = st.slider("Chart height", min_value=700, max_value=1800, value=1100, step=50)
 with controls[1]:
-    chart_width = st.slider("Chart width", min_value=1200, max_value=4200, value=2200, step=100)
+    chart_width = st.slider("Download width", min_value=1200, max_value=4200, value=2400, step=100)
 with controls[2]:
-    node_size = st.slider("Node size", min_value=34, max_value=95, value=58, step=1)
+    node_size = st.slider("Square size", min_value=36, max_value=120, value=68, step=1)
 with controls[3]:
     text_size = st.slider("Text size", min_value=10, max_value=24, value=14, step=1)
 with controls[4]:
-    x_gap = st.slider("Horizontal spacing", min_value=1.8, max_value=7.0, value=3.0, step=0.1)
+    x_gap = st.slider("Horizontal spacing", min_value=2.0, max_value=8.0, value=3.2, step=0.1)
 with controls[5]:
-    y_gap = st.slider("Base vertical spacing", min_value=12.0, max_value=16.0, value=3.2, step=0.1)
+    y_gap = st.slider("Base vertical spacing", min_value=2.0, max_value=9.0, value=4.2, step=0.1)
 with controls[6]:
-    lane_spread = st.slider("Lane spread multiplier", min_value=1.0, max_value=3.0, value=1.6, step=0.1)
+    lane_spread = st.slider("Lane spread multiplier", min_value=1.2, max_value=3.5, value=2.1, step=0.1)
 with controls[7]:
     label_width = st.slider("Label wrap width", min_value=10, max_value=28, value=16, step=1)
 
@@ -70,7 +70,7 @@ with download_cols[0]:
 with download_cols[1]:
     download_name = st.text_input("Download filename", value="precedence_network")
 with download_cols[2]:
-    st.caption("Use the toolbar at top-right to pan, zoom, reset, and download.")
+    st.caption("Pan, zoom, reset, and download from the toolbar at top-right.")
 
 steps = load_current_state_steps(ctx["excel_file"], sheet_name=ctx["sheet_name"])
 normalized = normalize_steps(steps)
@@ -97,7 +97,7 @@ else:
     graph = full_graph.copy()
 
 
-def build_left_to_right_positions(g: nx.DiGraph, x_step: float, y_step: float, spread_mult: float):
+def build_positions(g: nx.DiGraph, x_step: float, base_y: float, spread_mult: float):
     level = {n: 0 for n in g.nodes()}
     for n in nx.topological_sort(g):
         preds = list(g.predecessors(n))
@@ -108,14 +108,14 @@ def build_left_to_right_positions(g: nx.DiGraph, x_step: float, y_step: float, s
     for node, lv in level.items():
         grouped.setdefault(lv, []).append(node)
 
-    max_group = max((len(nodes) for nodes in grouped.values()), default=1)
-    auto_y = y_step * spread_mult
-
+    # Wider spacing for dense layers to keep square nodes from overlapping.
     pos = {}
+    max_group = 1
     for lv in sorted(grouped):
         nodes = sorted(grouped[lv])
+        max_group = max(max_group, len(nodes))
         center = (len(nodes) - 1) / 2.0
-        local_y = auto_y * (1.0 + 0.18 * max(0, len(nodes) - 2))
+        local_y = base_y * spread_mult * (1.0 + 0.18 * max(0, len(nodes) - 1))
         for idx, node in enumerate(nodes):
             x = lv * x_step
             y = (center - idx) * local_y
@@ -152,7 +152,7 @@ def hover_label(g: nx.DiGraph, node_id: int) -> str:
     )
 
 
-pos, level, max_group = build_left_to_right_positions(graph, x_gap, y_gap, lane_spread)
+pos, level, max_group = build_positions(graph, x_gap, y_gap, lane_spread)
 critical_ids = outputs.get("critical_path_task_ids", [])
 critical_nodes = set(critical_ids)
 critical_edges = set(zip(critical_ids[:-1], critical_ids[1:]))
@@ -163,7 +163,6 @@ edge_x_critical, edge_y_critical = [], []
 for u, v in graph.edges():
     x0, y0 = pos[u]
     x1, y1 = pos[v]
-
     if curved_edges and level[u] != level[v]:
         mid_x = (x0 + x1) / 2.0
         xs = [x0, mid_x, x1, None]
@@ -185,7 +184,7 @@ edge_trace_normal = go.Scatter(
     x=edge_x_normal,
     y=edge_y_normal,
     mode="lines",
-    line=dict(width=1.5, color="#A0A7AE", shape=line_shape),
+    line=dict(width=1.6, color="#A0A7AE", shape=line_shape),
     hoverinfo="skip",
     showlegend=False,
 )
@@ -194,7 +193,7 @@ edge_trace_critical = go.Scatter(
     x=edge_x_critical,
     y=edge_y_critical,
     mode="lines",
-    line=dict(width=3.0, color="#C0392B", shape=line_shape),
+    line=dict(width=3.2, color="#C0392B", shape=line_shape),
     hoverinfo="skip",
     showlegend=False,
 )
@@ -226,7 +225,12 @@ node_trace_normal = go.Scatter(
     textfont=dict(size=text_size, color="#111111"),
     hovertext=hover_normal,
     hovertemplate="%{hovertext}<extra></extra>",
-    marker=dict(size=node_size, color="#D6EAF8", line=dict(width=2, color="#1F4E79")),
+    marker=dict(
+        symbol="square",
+        size=node_size,
+        color="#D6EAF8",
+        line=dict(width=2, color="#1F4E79"),
+    ),
     showlegend=False,
 )
 
@@ -239,20 +243,30 @@ node_trace_critical = go.Scatter(
     textfont=dict(size=text_size, color="#111111"),
     hovertext=hover_critical,
     hovertemplate="%{hovertext}<extra></extra>",
-    marker=dict(size=node_size + 6, color="#F9D6D5", line=dict(width=2.2, color="#922B21")),
+    marker=dict(
+        symbol="square",
+        size=node_size + 6,
+        color="#F9D6D5",
+        line=dict(width=2.2, color="#922B21"),
+    ),
     showlegend=False,
 )
 
 xs = [p[0] for p in pos.values()] if pos else [0]
 ys = [p[1] for p in pos.values()] if pos else [0]
-x_pad = max(0.7, (max(xs) - min(xs)) * 0.04) if len(xs) > 1 else 1
-y_pad = max(1.8, (max(ys) - min(ys)) * 0.18) if len(ys) > 1 else 2.5
+
+# Tight bounds so the chart fills the viewport and downloads without big margins.
+x_span = (max(xs) - min(xs)) if len(xs) > 1 else 1
+y_span = (max(ys) - min(ys)) if len(ys) > 1 else 1
+x_pad = max(0.35, x_span * 0.015)
+y_pad = max(0.55, y_span * 0.06)
 
 fig = go.Figure(data=[edge_trace_normal, edge_trace_critical, node_trace_normal, node_trace_critical])
 
 fig.update_layout(
+    autosize=True,
     height=chart_height,
-    margin=dict(l=10, r=10, t=10, b=10),
+    margin=dict(l=2, r=2, t=2, b=2),
     paper_bgcolor="white",
     plot_bgcolor="white",
     dragmode="pan",
@@ -260,6 +274,7 @@ fig.update_layout(
         visible=False,
         range=[min(xs) - x_pad, max(xs) + x_pad],
         fixedrange=False,
+        constrain="domain",
     ),
     yaxis=dict(
         visible=False,
@@ -267,6 +282,7 @@ fig.update_layout(
         fixedrange=False,
         scaleanchor="x",
         scaleratio=1,
+        constrain="domain",
     ),
 )
 
@@ -274,6 +290,7 @@ st.plotly_chart(
     fig,
     width="stretch",
     config={
+        "responsive": True,
         "scrollZoom": True,
         "displayModeBar": True,
         "displaylogo": False,
