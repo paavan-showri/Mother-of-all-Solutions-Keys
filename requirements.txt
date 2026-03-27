@@ -6,4 +6,3 @@ openpyxl
 numpy
 networkx
 ortools
-scikit-learn

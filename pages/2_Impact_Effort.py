@@ -1,21 +1,20 @@
 import io
 import math
 import re
-from collections import defaultdict
+from typing import Dict, List, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from sklearn.cluster import DBSCAN
 
 st.set_page_config(page_title="Impact vs Effort", layout="wide")
-st.title("Impact vs Effort Matrix")
+st.title("Zoomable Impact vs Effort Quadtree")
 
 BOTTOM_NOTE = (
-    "This page keeps the original Lean impact-effort logic, but now it supports zoomable recursive "
-    "quadrants, optional DBSCAN cluster detection, and a priority handoff table for future RCPSP "
-    "scheduling. Activities stay anchored to their continuous impact and effort scores instead of "
-    "being packed into one corner of a cell."
+    "This view keeps the original Lean impact-effort logic, but instead of showing every recursive "
+    "level at once, it shows one quadtree level at a time. Click a quadrant label to expand that "
+    "subdivision, or click an activity marker to highlight the matching row. This avoids the heavy "
+    "clustering that happens when all nested levels are drawn together."
 )
 
 QUADRANT_COLORS = {
@@ -25,12 +24,25 @@ QUADRANT_COLORS = {
     "Time Sinks": "#ff4d6d",
 }
 
+QUADRANT_ORDER = ["Quick Wins", "Major Projects", "Fill-Ins", "Time Sinks"]
+QUADRANT_SHORT = {
+    "Quick Wins": "QW",
+    "Major Projects": "MP",
+    "Fill-Ins": "FI",
+    "Time Sinks": "TS",
+}
+
 PLOT_BG = "#dcdcdc"
-GRID_LINE = "rgba(55, 95, 150, 0.75)"
-FILL_TEMPLATE = "rgba(80, 110, 150, {alpha})"
-ROOT_BOUNDS = (0.0, 1.0, 0.0, 1.0)
-LEAF_CAPACITY = 10
+CELL_LINE = "rgba(65, 105, 155, 0.85)"
+CELL_FILL = "rgba(68, 95, 127, 0.06)"
+CHILD_FILL = {
+    "Quick Wins": "rgba(15, 157, 154, 0.06)",
+    "Major Projects": "rgba(99, 91, 255, 0.06)",
+    "Fill-Ins": "rgba(47, 120, 255, 0.06)",
+    "Time Sinks": "rgba(255, 77, 109, 0.06)",
+}
 MAX_DEPTH = 5
+SHOW_POINTS_THRESHOLD = 16
 
 
 # -------------------------
@@ -333,264 +345,217 @@ def compute_continuous_scores(df):
 
 
 # -------------------------
-# Recursive nodes and clustering
+# Quadtree helpers
 # -------------------------
-def split_bounds(bounds):
+def child_bounds(bounds: Tuple[float, float, float, float], quadrant: str) -> Tuple[float, float, float, float]:
     xmin, xmax, ymin, ymax = bounds
     xmid = (xmin + xmax) / 2.0
     ymid = (ymin + ymax) / 2.0
-    return {
-        "Quick Wins": (xmin, xmid, ymid, ymax),
-        "Major Projects": (xmid, xmax, ymid, ymax),
-        "Fill-Ins": (xmin, xmid, ymin, ymid),
-        "Time Sinks": (xmid, xmax, ymin, ymid),
-    }
+    if quadrant == "Quick Wins":
+        return xmin, xmid, ymid, ymax
+    if quadrant == "Major Projects":
+        return xmid, xmax, ymid, ymax
+    if quadrant == "Fill-Ins":
+        return xmin, xmid, ymin, ymid
+    return xmid, xmax, ymin, ymid
 
 
-def quadrant_for_point(effort_score, impact_score, bounds):
-    child_boxes = split_bounds(bounds)
-    xmid = (bounds[0] + bounds[1]) / 2.0
-    ymid = (bounds[2] + bounds[3]) / 2.0
-    if effort_score <= xmid and impact_score > ymid:
-        return "Quick Wins", child_boxes["Quick Wins"]
-    if effort_score > xmid and impact_score > ymid:
-        return "Major Projects", child_boxes["Major Projects"]
-    if effort_score <= xmid and impact_score <= ymid:
-        return "Fill-Ins", child_boxes["Fill-Ins"]
-    return "Time Sinks", child_boxes["Time Sinks"]
+def path_to_bounds(path: List[str]) -> Tuple[float, float, float, float]:
+    bounds = (0.0, 1.0, 0.0, 1.0)
+    for quadrant in path:
+        bounds = child_bounds(bounds, quadrant)
+    return bounds
 
 
-def build_quadtree_nodes(df, max_depth=MAX_DEPTH, leaf_capacity=LEAF_CAPACITY):
-    nodes = []
-
-    def recurse(node_df, bounds, path, depth):
-        node_id = "Root" if not path else " > ".join(path)
-        node = {
-            "id": node_id,
-            "path": list(path),
-            "bounds": bounds,
-            "depth": depth,
-            "count": len(node_df),
-            "is_leaf": len(node_df) <= leaf_capacity or depth >= max_depth,
-        }
-        nodes.append(node)
-        if node["is_leaf"] or len(node_df) == 0:
-            return
-        buckets = defaultdict(list)
-        for _, row in node_df.iterrows():
-            qname, child_bounds = quadrant_for_point(float(row["Effort Score"]), float(row["Impact Score"]), bounds)
-            key = (qname, child_bounds)
-            buckets[key].append(row)
-        for (qname, child_bounds), rows in buckets.items():
-            child_df = pd.DataFrame(rows)
-            recurse(child_df, child_bounds, path + [qname], depth + 1)
-
-    recurse(df.copy(), ROOT_BOUNDS, [], 0)
-    return nodes
+def path_label(path: List[str]) -> str:
+    if not path:
+        return "Root"
+    return " > ".join(path)
 
 
-def assign_recursive_path(df, max_depth=MAX_DEPTH):
+def score_to_path(effort_score: float, impact_score: float, levels: int) -> List[str]:
+    path = []
+    bounds = (0.0, 1.0, 0.0, 1.0)
+    for _ in range(levels):
+        xmin, xmax, ymin, ymax = bounds
+        xmid = (xmin + xmax) / 2.0
+        ymid = (ymin + ymax) / 2.0
+        if effort_score <= xmid and impact_score > ymid:
+            quad = "Quick Wins"
+        elif effort_score > xmid and impact_score > ymid:
+            quad = "Major Projects"
+        elif effort_score <= xmid and impact_score <= ymid:
+            quad = "Fill-Ins"
+        else:
+            quad = "Time Sinks"
+        path.append(quad)
+        bounds = child_bounds(bounds, quad)
+    return path
+
+
+def assign_recursive_paths(df: pd.DataFrame, levels: int) -> pd.DataFrame:
+    temp = df.copy()
+    temp["Recursive Path List"] = temp.apply(
+        lambda row: score_to_path(float(row["Effort Score"]), float(row["Impact Score"]), levels),
+        axis=1,
+    )
+    temp["Recursive Path"] = temp["Recursive Path List"].apply(lambda x: " > ".join(x))
+    return temp
+
+
+def path_starts_with(full_path: List[str], prefix: List[str]) -> bool:
+    return full_path[: len(prefix)] == prefix
+
+
+def get_node_df(df: pd.DataFrame, focus_path: List[str]) -> pd.DataFrame:
+    return df[df["Recursive Path List"].apply(lambda p: path_starts_with(p, focus_path))].copy()
+
+
+def get_child_df(df: pd.DataFrame, focus_path: List[str], child_name: str) -> pd.DataFrame:
+    child_path = focus_path + [child_name]
+    return df[df["Recursive Path List"].apply(lambda p: path_starts_with(p, child_path))].copy()
+
+
+def assign_points_in_bounds(df: pd.DataFrame, bounds: Tuple[float, float, float, float]) -> pd.DataFrame:
+    temp = df.sort_values(["Impact Score", "Effort Score", "Step"], ascending=[False, True, True]).reset_index(drop=True).copy()
+    n = len(temp)
+    if n == 0:
+        return temp
+
+    xmin, xmax, ymin, ymax = bounds
+    cols = math.ceil(math.sqrt(n))
+    rows = math.ceil(n / cols)
+    pad_x = (xmax - xmin) * 0.14
+    pad_y = (ymax - ymin) * 0.14
+    ux0, ux1 = xmin + pad_x, xmax - pad_x
+    uy0, uy1 = ymin + pad_y, ymax - pad_y
+
+    xs, ys = [], []
+    for i in range(n):
+        r = i // cols
+        c = i % cols
+        x = ux0 + (c + 0.5) * (ux1 - ux0) / cols
+        y = uy1 - (r + 0.5) * (uy1 - uy0) / rows
+        xs.append(x)
+        ys.append(y)
+
+    temp["x"] = xs
+    temp["y"] = ys
+    return temp
+
+
+def build_focus_plot_df(df: pd.DataFrame, focus_path: List[str]) -> pd.DataFrame:
+    pieces = []
+    for quad in QUADRANT_ORDER:
+        child_df = get_child_df(df, focus_path, quad)
+        if child_df.empty:
+            continue
+        bounds = child_bounds(path_to_bounds(focus_path), quad)
+        placed = assign_points_in_bounds(child_df, bounds)
+        placed["Visible Child"] = quad
+        pieces.append(placed)
+    if not pieces:
+        return pd.DataFrame()
+    return pd.concat(pieces, ignore_index=True)
+
+
+def get_child_summary(df: pd.DataFrame, focus_path: List[str]) -> pd.DataFrame:
     rows = []
-    for _, row in df.iterrows():
-        bounds = ROOT_BOUNDS
-        path = []
-        for _depth in range(max_depth):
-            qname, child_bounds = quadrant_for_point(float(row["Effort Score"]), float(row["Impact Score"]), bounds)
-            path.append(qname)
-            bounds = child_bounds
-        row_copy = row.copy()
-        row_copy["Recursive Path"] = " > ".join(path)
-        row_copy["Leaf XMin"] = bounds[0]
-        row_copy["Leaf XMax"] = bounds[1]
-        row_copy["Leaf YMin"] = bounds[2]
-        row_copy["Leaf YMax"] = bounds[3]
-        rows.append(row_copy)
+    for quad in QUADRANT_ORDER:
+        child_df = get_child_df(df, focus_path, quad)
+        bounds = child_bounds(path_to_bounds(focus_path), quad)
+        count = len(child_df)
+        if count == 0:
+            avg_impact = None
+            avg_effort = None
+        else:
+            avg_impact = float(child_df["Impact Score"].mean())
+            avg_effort = float(child_df["Effort Score"].mean())
+        rows.append({
+            "Quadrant": quad,
+            "Count": count,
+            "Avg Impact Score": avg_impact,
+            "Avg Effort Score": avg_effort,
+            "bounds": bounds,
+            "path": focus_path + [quad],
+        })
     return pd.DataFrame(rows)
 
 
-def add_deterministic_jitter(df, x_col="Effort Score", y_col="Impact Score"):
-    df = df.copy().sort_values("Step").reset_index(drop=True)
-    groups = defaultdict(list)
-    for idx, row in df.iterrows():
-        key = (round(float(row[x_col]), 2), round(float(row[y_col]), 2), row["Quadrant"])
-        groups[key].append(idx)
-
-    jitter_x = [0.0] * len(df)
-    jitter_y = [0.0] * len(df)
-    for indices in groups.values():
-        n = len(indices)
-        if n == 1:
-            continue
-        radius = min(0.012 + 0.002 * math.sqrt(n), 0.028)
-        for pos, idx in enumerate(indices):
-            angle = 2 * math.pi * pos / n
-            jitter_x[idx] = radius * math.cos(angle)
-            jitter_y[idx] = radius * math.sin(angle)
-
-    df["plot_x"] = (df[x_col] + pd.Series(jitter_x)).clip(0.01, 0.99)
-    df["plot_y"] = (df[y_col] + pd.Series(jitter_y)).clip(0.01, 0.99)
-    return df
-
-
-def apply_dbscan(df, eps=0.065, min_samples=3):
-    coords = df[["Effort Score", "Impact Score"]].to_numpy()
-    model = DBSCAN(eps=eps, min_samples=min_samples)
-    labels = model.fit_predict(coords)
-    out = df.copy()
-    out["Cluster"] = labels
-    return out
-
-
-def cluster_boxes(df):
-    shapes = []
-    label_ann = []
-    clustered = df[df["Cluster"] >= 0].copy()
-    for cluster_id, grp in clustered.groupby("Cluster"):
-        pad = 0.018
-        x0 = max(float(grp["plot_x"].min()) - pad, 0.0)
-        x1 = min(float(grp["plot_x"].max()) + pad, 1.0)
-        y0 = max(float(grp["plot_y"].min()) - pad, 0.0)
-        y1 = min(float(grp["plot_y"].max()) + pad, 1.0)
-        shapes.append(
-            dict(
-                type="rect",
-                x0=x0,
-                x1=x1,
-                y0=y0,
-                y1=y1,
-                line=dict(color="rgba(0,0,0,0.45)", width=1.5, dash="dot"),
-                fillcolor="rgba(255,255,255,0)",
-                layer="below",
-            )
-        )
-        label_ann.append(
-            dict(
-                x=(x0 + x1) / 2,
-                y=y1,
-                xref="x",
-                yref="y",
-                text=f"C{int(cluster_id)}",
-                showarrow=False,
-                yshift=10,
-                font=dict(size=11, color="black"),
-            )
-        )
-    return shapes, label_ann
-
-
-def node_options(nodes):
-    options = ["Root"]
-    options.extend([n["id"] for n in nodes if n["id"] != "Root" and n["count"] > 0])
-    return options
-
-
-def find_node(nodes, node_id):
-    for node in nodes:
-        if node["id"] == node_id:
-            return node
-    return {"id": "Root", "bounds": ROOT_BOUNDS, "depth": 0, "count": 0}
-
-
-def parent_chain(node_id):
-    if node_id == "Root":
-        return ["Root"]
-    parts = node_id.split(" > ")
-    chain = ["Root"]
-    for i in range(1, len(parts) + 1):
-        chain.append(" > ".join(parts[:i]))
-    return chain
-
-
-def bounds_with_padding(bounds, pad=0.01):
-    xmin, xmax, ymin, ymax = bounds
-    return [max(0.0, xmin - pad), min(1.0, xmax + pad)], [max(0.0, ymin - pad), min(1.0, ymax + pad)]
-
-
-def visible_nodes(nodes, focus_bounds, max_extra_depth=1):
-    fx0, fx1, fy0, fy1 = focus_bounds
-    out = []
-    for node in nodes:
-        x0, x1, y0, y1 = node["bounds"]
-        inside = x0 >= fx0 - 1e-9 and x1 <= fx1 + 1e-9 and y0 >= fy0 - 1e-9 and y1 <= fy1 + 1e-9
-        if inside:
-            out.append(node)
-    return out
-
-
-def marker_size_for_range(xrng, yrng):
-    width = xrng[1] - xrng[0]
-    span = min(width, yrng[1] - yrng[0])
-    if span <= 0.08:
+def marker_size_from_count(count: int) -> int:
+    if count <= 6:
+        return 28
+    if count <= 12:
         return 24
-    if span <= 0.18:
-        return 18
-    return 13
+    return 20
 
 
-def base_annotations():
-    return [
-        dict(x=0.25, y=0.96, xref="paper", yref="paper", text="Quick Wins", showarrow=False,
-             font=dict(size=14, color=QUADRANT_COLORS["Quick Wins"])),
-        dict(x=0.75, y=0.96, xref="paper", yref="paper", text="Major Projects", showarrow=False,
-             font=dict(size=14, color=QUADRANT_COLORS["Major Projects"])),
-        dict(x=0.25, y=0.09, xref="paper", yref="paper", text="Fill-Ins", showarrow=False,
-             font=dict(size=14, color=QUADRANT_COLORS["Fill-Ins"])),
-        dict(x=0.75, y=0.09, xref="paper", yref="paper", text="Time Sinks", showarrow=False,
-             font=dict(size=14, color=QUADRANT_COLORS["Time Sinks"])),
-        dict(x=0.05, y=0.24, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=13, color="black")),
-        dict(x=0.05, y=0.76, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=13, color="black")),
-        dict(x=0.24, y=0.05, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=13, color="black")),
-        dict(x=0.76, y=0.05, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=13, color="black")),
-    ]
-
-
-def build_shapes(nodes, focus_bounds, use_dbscan=False, cluster_shapes=None):
-    shapes = []
-    for node in visible_nodes(nodes, focus_bounds):
-        if node["depth"] == 0:
-            continue
-        x0, x1, y0, y1 = node["bounds"]
-        lw = 2.0 if node["depth"] == 1 else 1.1
-        alpha = min(0.02 + 0.01 * node["depth"], 0.08)
-        shapes.append(
-            dict(
-                type="rect",
-                x0=x0,
-                x1=x1,
-                y0=y0,
-                y1=y1,
-                line=dict(color=GRID_LINE, width=lw),
-                fillcolor=FILL_TEMPLATE.format(alpha=f"{alpha:.3f}"),
-                layer="below",
-            )
+def add_child_rectangles(fig: go.Figure, child_summary: pd.DataFrame):
+    for _, row in child_summary.iterrows():
+        xmin, xmax, ymin, ymax = row["bounds"]
+        quad = row["Quadrant"]
+        fig.add_shape(
+            type="rect",
+            x0=xmin,
+            x1=xmax,
+            y0=ymin,
+            y1=ymax,
+            line=dict(color=CELL_LINE, width=1.4),
+            fillcolor=CHILD_FILL[quad],
+            layer="below",
         )
-    shapes.append(dict(type="line", x0=0.5, x1=0.5, y0=0.0, y1=1.0, line=dict(color="gray", dash="dash", width=1.8)))
-    shapes.append(dict(type="line", x0=0.0, x1=1.0, y0=0.5, y1=0.5, line=dict(color="gray", dash="dash", width=1.8)))
-    if use_dbscan and cluster_shapes:
-        shapes.extend(cluster_shapes)
-    return shapes
 
 
-def add_traces(fig, plot_df, marker_size, selected_step=None):
-    for quadrant, color in QUADRANT_COLORS.items():
-        temp = plot_df[plot_df["Quadrant"] == quadrant].copy().reset_index(drop=True)
+def add_cell_click_targets(fig: go.Figure, child_summary: pd.DataFrame):
+    centers_x, centers_y, labels, custom = [], [], [], []
+    for _, row in child_summary.iterrows():
+        xmin, xmax, ymin, ymax = row["bounds"]
+        quad = row["Quadrant"]
+        count = int(row["Count"])
+        centers_x.append((xmin + xmax) / 2.0)
+        centers_y.append((ymin + ymax) / 2.0)
+        labels.append(f"{quad}<br>{count}")
+        custom.append(["cell", quad, " > ".join(row["path"]), count])
+
+    fig.add_trace(
+        go.Scatter(
+            x=centers_x,
+            y=centers_y,
+            mode="markers+text",
+            text=labels,
+            textposition="middle center",
+            textfont=dict(size=16, color="black"),
+            marker=dict(size=56, opacity=0.01, color="rgba(0,0,0,0)"),
+            customdata=custom,
+            hovertemplate="Click to expand %{customdata[1]}<br>Count: %{customdata[3]}<extra></extra>",
+            showlegend=False,
+        )
+    )
+
+
+def add_activity_traces(fig: go.Figure, plot_df: pd.DataFrame, selected_step=None):
+    if plot_df.empty:
+        return
+    for quad in QUADRANT_ORDER:
+        temp = plot_df[plot_df["Visible Child"] == quad].copy().reset_index(drop=True)
         if temp.empty:
             continue
+        marker_size = marker_size_from_count(len(temp))
         selected_points = None
         if selected_step is not None and selected_step in temp["Step"].tolist():
             selected_points = [temp.index[temp["Step"] == selected_step][0]]
         fig.add_trace(
             go.Scatter(
-                x=temp["plot_x"],
-                y=temp["plot_y"],
+                x=temp["x"],
+                y=temp["y"],
                 mode="markers+text",
                 text=temp["Step"].astype(str),
                 textposition="middle center",
-                textfont=dict(size=max(8, marker_size - 6), color="black"),
-                marker=dict(size=marker_size, color="rgba(255,255,255,0)", line=dict(color=color, width=2)),
+                textfont=dict(size=max(8, marker_size - 10), color="black"),
+                marker=dict(size=marker_size, color="rgba(255,255,255,0)", line=dict(color=QUADRANT_COLORS[quad], width=2)),
                 customdata=temp[[
                     "Step", "Description", "Activity", "Therblig / Motion Type", "Motion Class",
-                    "Impact Score", "Effort Score", "Recursive Path", "Cluster"
+                    "Impact Score", "Effort Score", "Recursive Path", "Visible Child"
                 ]].values,
                 hovertemplate=(
                     "Step: %{customdata[0]}"
@@ -601,193 +566,23 @@ def add_traces(fig, plot_df, marker_size, selected_step=None):
                     "<br>Impact Score: %{customdata[5]:.3f}"
                     "<br>Effort Score: %{customdata[6]:.3f}"
                     "<br>Recursive Path: %{customdata[7]}"
-                    "<br>Cluster: %{customdata[8]}"
                     "<extra></extra>"
                 ),
-                hoverlabel=dict(bgcolor="white", bordercolor="black", font=dict(color="black", size=12)),
                 selectedpoints=selected_points,
-                selected=dict(marker=dict(size=marker_size + 5, color="black", opacity=1.0)),
-                unselected=dict(marker=dict(opacity=0.82)),
+                selected=dict(marker=dict(size=marker_size + 6, color="black", opacity=1.0)),
+                unselected=dict(marker=dict(opacity=0.75)),
                 showlegend=False,
             )
         )
 
 
-def make_main_figure(plot_df, nodes, focus_node_id="Root", selected_step=None, use_dbscan=False):
-    focus_node = find_node(nodes, focus_node_id)
-    xrng, yrng = bounds_with_padding(focus_node["bounds"], pad=0.01)
-    visible_df = plot_df[
-        plot_df["Effort Score"].between(xrng[0], xrng[1]) &
-        plot_df["Impact Score"].between(yrng[0], yrng[1])
-    ].copy()
-    cluster_shapes, cluster_ann = ([], [])
-    if use_dbscan:
-        cluster_shapes, cluster_ann = cluster_boxes(visible_df)
-    marker_size = marker_size_for_range(xrng, yrng)
-
-    fig = go.Figure()
-    add_traces(fig, visible_df, marker_size=marker_size, selected_step=selected_step)
-    fig.update_layout(
-        xaxis=dict(range=xrng, visible=False, fixedrange=True),
-        yaxis=dict(range=yrng, visible=False, fixedrange=True, scaleanchor="x", scaleratio=1),
-        plot_bgcolor=PLOT_BG,
-        paper_bgcolor=PLOT_BG,
-        height=940,
-        margin=dict(l=70, r=30, t=70, b=60),
-        clickmode="event+select",
-        dragmode="select",
-        shapes=build_shapes(nodes, focus_node["bounds"], use_dbscan=use_dbscan, cluster_shapes=cluster_shapes),
-        annotations=[
-            dict(x=0.50, y=1.06, xref="paper", yref="paper", text="Impact vs Effort Matrix", showarrow=False,
-                 font=dict(size=22, color="black")),
-            dict(x=0.50, y=0.01, xref="paper", yref="paper", text="Effort", showarrow=False,
-                 font=dict(size=18, color="black")),
-            dict(x=0.01, y=0.50, xref="paper", yref="paper", text="Impact", showarrow=False, textangle=-90,
-                 font=dict(size=18, color="black")),
-            dict(x=0.84, y=1.03, xref="paper", yref="paper", text=f"View: {focus_node_id}", showarrow=False,
-                 font=dict(size=12, color="black")),
-        ] + base_annotations() + cluster_ann,
-    )
-    return fig, visible_df
+def add_global_crosshair(fig: go.Figure):
+    fig.add_shape(type="line", x0=0.5, x1=0.5, y0=0.0, y1=1.0, line=dict(color="gray", dash="dash", width=1.5))
+    fig.add_shape(type="line", x0=0.0, x1=1.0, y0=0.5, y1=0.5, line=dict(color="gray", dash="dash", width=1.5))
 
 
-def make_animation_figure(plot_df, nodes, target_node_id, selected_step=None):
-    chain = parent_chain(target_node_id)
-    first_node = find_node(nodes, chain[0])
-    xrng, yrng = bounds_with_padding(first_node["bounds"], pad=0.01)
-    marker_size = marker_size_for_range(xrng, yrng)
-    fig = go.Figure()
-    add_traces(fig, plot_df, marker_size=marker_size, selected_step=selected_step)
-
-    frames = []
-    for node_id in chain:
-        node = find_node(nodes, node_id)
-        fx, fy = bounds_with_padding(node["bounds"], pad=0.01)
-        frames.append(
-            go.Frame(
-                name=node_id,
-                layout=go.Layout(
-                    xaxis=dict(range=fx, visible=False, fixedrange=True),
-                    yaxis=dict(range=fy, visible=False, fixedrange=True, scaleanchor="x", scaleratio=1),
-                    shapes=build_shapes(nodes, node["bounds"]),
-                    annotations=[
-                        dict(x=0.50, y=1.06, xref="paper", yref="paper", text="Animated drill-down", showarrow=False,
-                             font=dict(size=22, color="black")),
-                        dict(x=0.84, y=1.03, xref="paper", yref="paper", text=f"Frame: {node_id}", showarrow=False,
-                             font=dict(size=12, color="black")),
-                    ] + base_annotations(),
-                ),
-            )
-        )
-
-    fig.frames = frames
-    fig.update_layout(
-        xaxis=dict(range=xrng, visible=False, fixedrange=True),
-        yaxis=dict(range=yrng, visible=False, fixedrange=True, scaleanchor="x", scaleratio=1),
-        plot_bgcolor=PLOT_BG,
-        paper_bgcolor=PLOT_BG,
-        height=700,
-        margin=dict(l=70, r=30, t=70, b=60),
-        updatemenus=[{
-            "type": "buttons",
-            "buttons": [
-                {
-                    "label": "Play",
-                    "method": "animate",
-                    "args": [None, {"frame": {"duration": 700, "redraw": True}, "transition": {"duration": 450}, "fromcurrent": True}],
-                },
-                {
-                    "label": "Pause",
-                    "method": "animate",
-                    "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate", "transition": {"duration": 0}}],
-                },
-            ],
-            "x": 0.01,
-            "y": 1.12,
-            "showactive": False,
-        }],
-        sliders=[{
-            "currentvalue": {"prefix": "Level: "},
-            "steps": [
-                {"label": name, "method": "animate", "args": [[name], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}, "transition": {"duration": 0}}]}
-                for name in chain
-            ]
-        }],
-        shapes=build_shapes(nodes, first_node["bounds"]),
-        annotations=[
-            dict(x=0.50, y=1.06, xref="paper", yref="paper", text="Animated drill-down", showarrow=False,
-                 font=dict(size=22, color="black")),
-        ] + base_annotations(),
-    )
-    return fig
-
-
-def build_priority_table(df):
+def make_impact_effort_matrix(df, focus_path: List[str], selected_step=None):
     df = df.copy()
-    quadrant_rank = {"Quick Wins": 1, "Major Projects": 2, "Fill-Ins": 3, "Time Sinks": 4}
-    df["Priority Bucket"] = df["Quadrant"].map({
-        "Quick Wins": "Do first",
-        "Major Projects": "Plan and schedule",
-        "Fill-Ins": "Bundle when capacity exists",
-        "Time Sinks": "Reduce, redesign, or eliminate",
-    })
-    df["Priority Score"] = (
-        (1 - df["Effort Score"]) * 0.45 + df["Impact Score"] * 0.55
-    ).round(4)
-    df["Quadrant Rank"] = df["Quadrant"].map(quadrant_rank)
-    df = df.sort_values(["Quadrant Rank", "Priority Score", "Duration Seconds", "Step"], ascending=[True, False, False, True])
-    df["RCPSP Priority"] = range(1, len(df) + 1)
-    return df
-
-
-# -------------------------
-# Table helpers
-# -------------------------
-def style_logic_table(df, selected_step=None):
-    def highlight_row(row):
-        if selected_step is not None and int(row["Step"]) == int(selected_step):
-            return ["background-color: #fff3b0; font-weight: bold;"] * len(row)
-        return [""] * len(row)
-    return df.style.apply(highlight_row, axis=1)
-
-
-def get_selected_step_from_event(event):
-    if not event:
-        return None
-    selection = event.get("selection", {}) if isinstance(event, dict) else getattr(event, "selection", {})
-    points = selection.get("points", []) if hasattr(selection, "get") else []
-    if not points:
-        return None
-    customdata = points[0].get("customdata", [])
-    if not customdata:
-        return None
-    try:
-        return int(customdata[0])
-    except Exception:
-        return None
-
-
-st.markdown(
-    """
-**Classification logic used in this chart**
-
-- It uses **Description + Activity + Activity Type + Duration (Sec) + Resources** together.
-- **Impact** is driven mainly by whether the motion is an **effective therblig** or an **ineffective / non-value-added therblig**.
-- **Effort** is scored separately using duration, motion waste, repeated walking / searching / inspection, and resource involvement.
-- Each activity is converted into a continuous **Impact Score** and **Effort Score** between 0 and 1.
-- The page now supports a **zoomable recursive quadrant view**, **animated drill-down**, **optional DBSCAN cluster boxes**, and a **priority handoff table** for RCPSP scheduling.
-"""
-)
-
-try:
-    file_bytes, sheet_name = require_upload()
-    df = load_full_data(file_bytes, sheet_name)
-
-    if "impact_effort_selected_step" not in st.session_state:
-        st.session_state["impact_effort_selected_step"] = None
-    if "impact_effort_focus_node" not in st.session_state:
-        st.session_state["impact_effort_focus_node"] = "Root"
-
     df[["Therblig / Motion Type", "Motion Class"]] = df.apply(
         lambda row: pd.Series(classify_therblig(row["Description"], row["Activity"], row["Activity Type"])),
         axis=1,
@@ -797,74 +592,150 @@ try:
     df["Quadrant"] = df.apply(get_quadrant, axis=1)
     df["Lean / Six Sigma Logic"] = df.apply(build_logic_text, axis=1)
     df = compute_continuous_scores(df.sort_values("Step").reset_index(drop=True))
-    nodes = build_quadtree_nodes(df)
-    df = assign_recursive_path(df)
+    df = assign_recursive_paths(df, MAX_DEPTH)
 
-    controls = st.columns([1.2, 1.3, 1.1, 1.1, 1.2])
-    with controls[0]:
-        focus_node = st.selectbox("Zoom region", options=node_options(nodes), index=node_options(nodes).index(st.session_state.get("impact_effort_focus_node", "Root")))
-    with controls[1]:
-        view_mode = st.selectbox("View mode", options=["Zoomable quadtree", "Animated drill-down"])
-    with controls[2]:
-        clustering_mode = st.selectbox("Clustering", options=["None", "DBSCAN"])
-    with controls[3]:
-        dbscan_eps = st.slider("DBSCAN eps", min_value=0.03, max_value=0.15, value=0.065, step=0.005)
-    with controls[4]:
-        dbscan_min = st.slider("DBSCAN min samples", min_value=2, max_value=8, value=3, step=1)
+    node_df = get_node_df(df, focus_path)
+    child_summary = get_child_summary(df, focus_path)
+    plot_df = build_focus_plot_df(df, focus_path)
 
-    st.session_state["impact_effort_focus_node"] = focus_node
-    use_dbscan = clustering_mode == "DBSCAN"
-    if use_dbscan:
-        df = apply_dbscan(df, eps=dbscan_eps, min_samples=dbscan_min)
+    fig = go.Figure()
+    add_child_rectangles(fig, child_summary)
+    add_global_crosshair(fig)
+    add_cell_click_targets(fig, child_summary)
+    add_activity_traces(fig, plot_df, selected_step=selected_step)
+
+    focus_title = f"Focus: {path_label(focus_path)}"
+    if focus_path:
+        subtitle = f"Showing immediate subdivisions inside {path_label(focus_path)}"
     else:
-        df["Cluster"] = -1
-    df = add_deterministic_jitter(df)
+        subtitle = "Showing the first recursive split of the full matrix"
 
-    if view_mode == "Zoomable quadtree":
-        fig, visible_df = make_main_figure(
-            df,
-            nodes,
-            focus_node_id=focus_node,
-            selected_step=st.session_state["impact_effort_selected_step"],
-            use_dbscan=use_dbscan,
-        )
-        chart_event = st.plotly_chart(
-            fig,
-            use_container_width=True,
-            theme=None,
-            key="impact_effort_chart",
-            on_select="rerun",
-            selection_mode="points",
-            config={"scrollZoom": False},
-        )
-        clicked_step = get_selected_step_from_event(chart_event)
-        if clicked_step is not None:
-            st.session_state["impact_effort_selected_step"] = clicked_step
-            selected_row = df[df["Step"] == clicked_step]
-            if not selected_row.empty:
-                st.session_state["impact_effort_focus_node"] = focus_node
-            st.rerun()
-    else:
-        anim_fig = make_animation_figure(df, nodes, target_node_id=focus_node, selected_step=st.session_state["impact_effort_selected_step"])
-        st.plotly_chart(anim_fig, use_container_width=True, theme=None, key="impact_effort_anim", config={"scrollZoom": False})
+    annotations = [
+        dict(x=0.50, y=1.06, xref="paper", yref="paper", text="Zoomable Impact vs Effort Quadtree", showarrow=False, font=dict(size=22, color="black")),
+        dict(x=0.50, y=1.02, xref="paper", yref="paper", text=focus_title, showarrow=False, font=dict(size=15, color="black")),
+        dict(x=0.50, y=0.99, xref="paper", yref="paper", text=subtitle, showarrow=False, font=dict(size=12, color="#333333")),
+        dict(x=0.50, y=0.01, xref="paper", yref="paper", text="Effort", showarrow=False, font=dict(size=18, color="black")),
+        dict(x=0.01, y=0.50, xref="paper", yref="paper", text="Impact", showarrow=False, textangle=-90, font=dict(size=18, color="black")),
+        dict(x=0.05, y=0.24, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=13, color="black")),
+        dict(x=0.05, y=0.76, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=13, color="black")),
+        dict(x=0.24, y=0.05, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=13, color="black")),
+        dict(x=0.76, y=0.05, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=13, color="black")),
+    ]
 
-    action_cols = st.columns([1, 1, 1])
-    with action_cols[0]:
-        if st.button("Reset zoom", use_container_width=True):
-            st.session_state["impact_effort_focus_node"] = "Root"
+    fig.update_layout(
+        xaxis=dict(range=[0, 1], visible=False, fixedrange=True),
+        yaxis=dict(range=[0, 1], visible=False, fixedrange=True, scaleanchor="x", scaleratio=1),
+        plot_bgcolor=PLOT_BG,
+        paper_bgcolor=PLOT_BG,
+        height=900,
+        margin=dict(l=70, r=30, t=90, b=60),
+        clickmode="event+select",
+        dragmode="select",
+        annotations=annotations,
+    )
+    return fig, df, node_df, child_summary
+
+
+def build_rcpsp_priority_table(df: pd.DataFrame, focus_path: List[str]) -> pd.DataFrame:
+    temp = get_node_df(df, focus_path).copy()
+    temp["Quadrant Weight"] = temp["Quadrant"].map({
+        "Quick Wins": 4,
+        "Major Projects": 3,
+        "Fill-Ins": 2,
+        "Time Sinks": 1,
+    }).fillna(1)
+    temp["RCPSP Priority Score"] = (
+        0.45 * temp["Quadrant Weight"] +
+        0.35 * temp["Impact Score"] -
+        0.20 * temp["Effort Score"]
+    )
+    temp = temp.sort_values(["RCPSP Priority Score", "Impact Score", "Effort Score", "Step"], ascending=[False, False, True, True]).reset_index(drop=True)
+    temp["RCPSP Priority Rank"] = range(1, len(temp) + 1)
+    return temp[[
+        "RCPSP Priority Rank", "Step", "Description", "Quadrant", "Impact", "Effort",
+        "Impact Score", "Effort Score", "RCPSP Priority Score", "Recursive Path"
+    ]]
+
+
+def style_logic_table(df, selected_step=None):
+    def highlight_row(row):
+        if selected_step is not None and int(row["Step"]) == int(selected_step):
+            return ["background-color: #fff3b0; font-weight: bold;"] * len(row)
+        return [""] * len(row)
+
+    return df.style.apply(highlight_row, axis=1)
+
+
+def get_selected_payload_from_event(event):
+    if not event:
+        return None
+    selection = event.get("selection", {}) if isinstance(event, dict) else getattr(event, "selection", {})
+    points = selection.get("points", []) if hasattr(selection, "get") else []
+    if not points:
+        return None
+    return points[0].get("customdata", None)
+
+
+st.markdown(
+    """
+**How this zoomable view works**
+
+- The original chart logic still classifies each activity into **Quick Wins, Major Projects, Fill-Ins, and Time Sinks**.
+- Each activity is also converted to a continuous **Impact Score** and **Effort Score** between 0 and 1.
+- The matrix is recursively divided into the same four quadrants again and again.
+- To avoid heavy clustering, this page shows **one recursive level at a time**. Click a quadrant label to expand it.
+- The **RCPSP priority table** below turns the currently focused node into an execution priority list that can feed a scheduling model.
+"""
+)
+
+try:
+    file_bytes, sheet_name = require_upload()
+    df = load_full_data(file_bytes, sheet_name)
+
+    if "impact_effort_selected_step" not in st.session_state:
+        st.session_state["impact_effort_selected_step"] = None
+    if "impact_effort_focus_path" not in st.session_state:
+        st.session_state["impact_effort_focus_path"] = []
+
+    focus_path = st.session_state["impact_effort_focus_path"]
+    fig, full_df, node_df, child_summary = make_impact_effort_matrix(
+        df,
+        focus_path=focus_path,
+        selected_step=st.session_state["impact_effort_selected_step"],
+    )
+
+    nav1, nav2, nav3 = st.columns([1, 1, 2])
+    with nav1:
+        if st.button("Back one level", use_container_width=True, disabled=(len(focus_path) == 0)):
+            st.session_state["impact_effort_focus_path"] = focus_path[:-1]
             st.rerun()
-    with action_cols[1]:
-        if st.button("Zoom to selected step path", use_container_width=True):
-            step = st.session_state.get("impact_effort_selected_step")
-            if step is not None:
-                row = df[df["Step"] == step]
-                if not row.empty:
-                    parts = row.iloc[0]["Recursive Path"].split(" > ")[:3]
-                    st.session_state["impact_effort_focus_node"] = " > ".join(parts) if parts else "Root"
-                    st.rerun()
-    with action_cols[2]:
-        if st.button("Clear marker selection", use_container_width=True):
-            st.session_state["impact_effort_selected_step"] = None
+    with nav2:
+        if st.button("Reset to root", use_container_width=True):
+            st.session_state["impact_effort_focus_path"] = []
+            st.rerun()
+    with nav3:
+        st.caption(f"Current focus path: {path_label(focus_path)}")
+
+    chart_event = st.plotly_chart(
+        fig,
+        use_container_width=True,
+        theme=None,
+        key="impact_effort_chart",
+        on_select="rerun",
+        selection_mode="points",
+        config={"scrollZoom": False},
+    )
+
+    payload = get_selected_payload_from_event(chart_event)
+    if payload is not None:
+        if payload[0] == "cell":
+            clicked_quad = payload[1]
+            clicked_count = int(payload[3])
+            if clicked_count > 0 and len(focus_path) < MAX_DEPTH:
+                st.session_state["impact_effort_focus_path"] = focus_path + [clicked_quad]
+                st.rerun()
+        else:
+            st.session_state["impact_effort_selected_step"] = int(payload[0])
             st.rerun()
 
     st.markdown(
@@ -876,37 +747,43 @@ try:
         unsafe_allow_html=True,
     )
 
-    st.markdown("### RCPSP priority handoff")
-    priority_df = build_priority_table(df)
-    priority_view = priority_df[[
-        "RCPSP Priority", "Step", "Description", "Quadrant", "Priority Bucket", "Impact Score", "Effort Score",
-        "Duration Seconds", "Recursive Path", "Cluster"
-    ]].copy()
-    priority_view["Impact Score"] = priority_view["Impact Score"].round(3)
-    priority_view["Effort Score"] = priority_view["Effort Score"].round(3)
-    priority_view.rename(columns={"Duration Seconds": "Duration (s)"}, inplace=True)
-    st.dataframe(priority_view, use_container_width=True, hide_index=True)
+    st.markdown("### Visible subdivision summary")
+    summary_df = child_summary[["Quadrant", "Count", "Avg Impact Score", "Avg Effort Score"]].copy()
+    summary_df["Avg Impact Score"] = summary_df["Avg Impact Score"].round(3)
+    summary_df["Avg Effort Score"] = summary_df["Avg Effort Score"].round(3)
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-    csv_bytes = priority_view.to_csv(index=False).encode("utf-8")
-    st.download_button("Download RCPSP priority CSV", data=csv_bytes, file_name="impact_effort_rcpsp_priority.csv", mime="text/csv")
+    st.markdown("### RCPSP auto-priority list for the current focus")
+    rcpsp_df = build_rcpsp_priority_table(full_df, focus_path)
+    rcpsp_df["Impact Score"] = rcpsp_df["Impact Score"].round(3)
+    rcpsp_df["Effort Score"] = rcpsp_df["Effort Score"].round(3)
+    rcpsp_df["RCPSP Priority Score"] = rcpsp_df["RCPSP Priority Score"].round(3)
+    st.dataframe(rcpsp_df, use_container_width=True, hide_index=True)
 
     st.markdown("### Activity classification table")
-    filter_col1, filter_col2 = st.columns([1, 1])
+
+    filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 1.2])
     with filter_col1:
         impact_filter = st.multiselect("Filter Impact", options=["Low", "High"], default=["Low", "High"])
     with filter_col2:
         effort_filter = st.multiselect("Filter Effort", options=["Low", "High"], default=["Low", "High"])
+    with filter_col3:
+        if st.button("Clear marker selection", use_container_width=True):
+            st.session_state["impact_effort_selected_step"] = None
+            st.rerun()
 
-    display_df = df.copy()
+    display_df = full_df.copy()
     display_df = display_df[
-        display_df["Impact"].isin(impact_filter) & display_df["Effort"].isin(effort_filter)
+        display_df["Impact"].isin(impact_filter) &
+        display_df["Effort"].isin(effort_filter)
     ].copy()
     display_df = display_df.sort_values(["Step", "Impact", "Effort"]).reset_index(drop=True)
     display_df["Duration"] = display_df["Duration Seconds"].round(0).astype(int).astype(str) + " s"
 
     table_cols = [
-        "Step", "Description", "Activity", "Therblig / Motion Type", "Motion Class", "Impact", "Effort", "Quadrant",
-        "Impact Score", "Effort Score", "Recursive Path", "Cluster", "Duration", "Lean / Six Sigma Logic",
+        "Step", "Description", "Activity", "Therblig / Motion Type", "Motion Class",
+        "Impact", "Effort", "Quadrant", "Impact Score", "Effort Score", "Recursive Path",
+        "Duration", "Lean / Six Sigma Logic",
     ]
     display_df = display_df[table_cols].rename(columns={
         "Therblig / Motion Type": "Therblig",
@@ -921,6 +798,6 @@ try:
     if st.session_state.get("impact_effort_selected_step") is not None:
         st.caption(f"Selected marker: Step {st.session_state['impact_effort_selected_step']}. The matching row is highlighted below.")
     else:
-        st.caption("Click a marker once to select it and highlight the matching row in the table.")
+        st.caption("Click an activity marker to highlight it, or click a quadrant label/count to zoom into that node.")
 except Exception as e:
     st.error(f"Error: {e}")
