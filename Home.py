@@ -48,7 +48,6 @@ st.markdown(
 Current-state workbook → NLP normalization → IE ontology → Lean rules → automatic macro-task discovery → inferred precedence → RCPSP
 
 ### Notes
-- No ManufactuBERT
 - No hard-coded planner template mode
 - No fixed duration dictionary
 - No fixed predecessor dictionary
