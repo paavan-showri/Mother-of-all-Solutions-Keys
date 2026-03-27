@@ -1,7 +1,7 @@
 import textwrap
 
-import matplotlib.pyplot as plt
 import networkx as nx
+import plotly.graph_objects as go
 import streamlit as st
 
 from session_utils import require_workbook
@@ -15,51 +15,48 @@ st.set_page_config(page_title="Precedence Network", layout="wide")
 st.title("Precedence Network")
 ctx = require_workbook()
 
-# Keep UI simple and avoid deprecated container-width behavior.
-show_simplified = st.checkbox("Show simplified graph (recommended)", value=True)
+show_simplified = st.checkbox("Show simplified graph", value=True)
 
 controls = st.columns(6)
 with controls[0]:
-    chart_width = st.slider("Chart width", min_value=16, max_value=40, value=24, step=1)
+    chart_height = st.slider("Chart height", min_value=600, max_value=1800, value=950, step=50)
 with controls[1]:
-    chart_height = st.slider("Chart height", min_value=8, max_value=24, value=14, step=1)
+    x_gap = st.slider("Horizontal spacing", min_value=2.0, max_value=8.0, value=4.2, step=0.2)
 with controls[2]:
-    node_size = st.slider("Node size", min_value=3000, max_value=22000, value=11000, step=500)
+    y_gap = st.slider("Vertical spacing", min_value=1.0, max_value=5.0, value=2.1, step=0.1)
 with controls[3]:
-    font_size = st.slider("Text size", min_value=8, max_value=22, value=14, step=1)
+    node_size = st.slider("Node size", min_value=35, max_value=120, value=68, step=1)
 with controls[4]:
-    h_gap = st.slider("Horizontal spacing", min_value=2.0, max_value=8.0, value=4.2, step=0.2)
+    text_size = st.slider("Text size", min_value=10, max_value=26, value=16, step=1)
 with controls[5]:
-    v_gap = st.slider("Vertical spacing", min_value=1.0, max_value=5.0, value=2.0, step=0.1)
-
-label_width = st.slider("Wrap width", min_value=10, max_value=28, value=18, step=1)
+    wrap_width = st.slider("Wrap width", min_value=10, max_value=28, value=18, step=1)
 
 steps = load_current_state_steps(ctx["excel_file"], sheet_name=ctx["sheet_name"])
 normalized = normalize_steps(steps)
 tasks = generate_macro_tasks(normalized)
 outputs = build_precedence_outputs(tasks)
 
-full_graph = outputs.get("graph")
-graph = outputs.get("display_graph", full_graph) if show_simplified else full_graph
+full_graph = outputs["graph"]
 
 
-def _copy_attrs_from(source: nx.DiGraph, target: nx.DiGraph) -> nx.DiGraph:
+def copy_attrs(source: nx.DiGraph, target: nx.DiGraph) -> nx.DiGraph:
     for n, attrs in source.nodes(data=True):
         if n in target.nodes:
             target.nodes[n].update(attrs)
     return target
 
 
-if show_simplified and graph is full_graph:
-    # Build a display graph even if the module does not provide one.
+if show_simplified:
     try:
         graph = nx.transitive_reduction(full_graph)
-        graph = _copy_attrs_from(full_graph, graph)
+        graph = copy_attrs(full_graph, graph)
     except Exception:
         graph = full_graph.copy()
+else:
+    graph = full_graph.copy()
 
 
-def build_layered_positions(g: nx.DiGraph, x_gap: float, y_gap: float):
+def build_layered_positions(g: nx.DiGraph, x_gap_value: float, y_gap_value: float):
     level = {n: 0 for n in g.nodes()}
     for n in nx.topological_sort(g):
         preds = list(g.predecessors(n))
@@ -73,105 +70,162 @@ def build_layered_positions(g: nx.DiGraph, x_gap: float, y_gap: float):
     pos = {}
     for lv, nodes in grouped.items():
         nodes = sorted(nodes)
-        n_nodes = len(nodes)
-        center = (n_nodes - 1) / 2.0
+        center = (len(nodes) - 1) / 2.0
         for i, node in enumerate(nodes):
-            pos[node] = (lv * x_gap, (center - i) * y_gap)
+            pos[node] = (lv * x_gap_value, (center - i) * y_gap_value)
     return pos
 
 
-def wrapped_label(g: nx.DiGraph, n: int, width: int) -> str:
-    name = g.nodes[n].get("name", str(n))
-    wrapped = "\n".join(textwrap.wrap(str(name), width=width)[:3])
-    return f"{n}\n{wrapped}" if wrapped else str(n)
+def node_label(g: nx.DiGraph, node_id: int, width: int) -> str:
+    name = g.nodes[node_id].get("name", str(node_id))
+    wrapped = "<br>".join(textwrap.wrap(str(name), width=width)[:3])
+    return f"<b>{node_id}</b><br>{wrapped}" if wrapped else f"<b>{node_id}</b>"
 
 
-pos = build_layered_positions(graph, h_gap, v_gap)
-labels = {n: wrapped_label(graph, n, label_width) for n in graph.nodes()}
-
-cp_nodes = set(outputs.get("critical_path_task_ids", []))
-cp_edges = set(zip(outputs.get("critical_path_task_ids", [])[:-1], outputs.get("critical_path_task_ids", [])[1:]))
-
-fig, ax = plt.subplots(figsize=(chart_width, chart_height), dpi=120)
-fig.patch.set_facecolor("white")
-ax.set_facecolor("white")
-
-normal_edges = [e for e in graph.edges() if e not in cp_edges]
-normal_nodes = [n for n in graph.nodes() if n not in cp_nodes]
-highlight_nodes = [n for n in graph.nodes() if n in cp_nodes]
-highlight_edges = [e for e in graph.edges() if e in cp_edges]
-
-nx.draw_networkx_edges(
-    graph,
-    pos,
-    edgelist=normal_edges,
-    ax=ax,
-    arrows=True,
-    edge_color="#98a3a3",
-    width=1.8,
-    arrowsize=18,
-    connectionstyle="arc3,rad=0.03",
-)
-if highlight_edges:
-    nx.draw_networkx_edges(
-        graph,
-        pos,
-        edgelist=highlight_edges,
-        ax=ax,
-        arrows=True,
-        edge_color="#c0392b",
-        width=3.2,
-        arrowsize=20,
-        connectionstyle="arc3,rad=0.03",
+def node_hover(g: nx.DiGraph, node_id: int) -> str:
+    attrs = g.nodes[node_id]
+    name = attrs.get("name", str(node_id))
+    duration = attrs.get("duration_sec", "—")
+    preds = attrs.get("predecessors", [])
+    resources = attrs.get("resources", [])
+    if isinstance(resources, (list, tuple, set)):
+        resources_text = ", ".join(map(str, resources)) if resources else "—"
+    else:
+        resources_text = str(resources) if resources else "—"
+    preds_text = ", ".join(map(str, preds)) if preds else "—"
+    return (
+        f"<b>{name}</b><br>"
+        f"Task ID: {node_id}<br>"
+        f"Duration (sec): {duration}<br>"
+        f"Predecessors: {preds_text}<br>"
+        f"Resources: {resources_text}"
     )
 
-if normal_nodes:
-    nx.draw_networkx_nodes(
-        graph,
-        pos,
-        nodelist=normal_nodes,
-        ax=ax,
-        node_size=node_size,
-        node_color="#d6eaf8",
-        edgecolors="#1f4e79",
-        linewidths=1.3,
-    )
-if highlight_nodes:
-    nx.draw_networkx_nodes(
-        graph,
-        pos,
-        nodelist=highlight_nodes,
-        ax=ax,
-        node_size=int(node_size * 1.08),
-        node_color="#f9d6d5",
-        edgecolors="#922b21",
-        linewidths=1.5,
-    )
 
-nx.draw_networkx_labels(
-    graph,
-    pos,
-    labels=labels,
-    ax=ax,
-    font_size=font_size,
-    font_weight="bold",
-    verticalalignment="center",
+pos = build_layered_positions(graph, x_gap, y_gap)
+critical_ids = outputs.get("critical_path_task_ids", [])
+critical_nodes = set(critical_ids)
+critical_edges = set(zip(critical_ids[:-1], critical_ids[1:]))
+
+edge_x_normal, edge_y_normal = [], []
+edge_x_critical, edge_y_critical = [], []
+
+for u, v in graph.edges():
+    x0, y0 = pos[u]
+    x1, y1 = pos[v]
+    bucket_x = edge_x_critical if (u, v) in critical_edges else edge_x_normal
+    bucket_y = edge_y_critical if (u, v) in critical_edges else edge_y_normal
+    bucket_x.extend([x0, x1, None])
+    bucket_y.extend([y0, y1, None])
+
+edge_trace_normal = go.Scatter(
+    x=edge_x_normal,
+    y=edge_y_normal,
+    mode="lines",
+    line=dict(width=1.8, color="#98a3a3"),
+    hoverinfo="skip",
+    showlegend=False,
 )
 
-# Tighten bounds aggressively to remove excess white space.
-if pos:
-    xs = [p[0] for p in pos.values()]
-    ys = [p[1] for p in pos.values()]
-    x_pad = max(0.6, (max(xs) - min(xs)) * 0.02)
-    y_pad = max(0.6, (max(ys) - min(ys)) * 0.10)
-    ax.set_xlim(min(xs) - x_pad, max(xs) + x_pad)
-    ax.set_ylim(min(ys) - y_pad, max(ys) + y_pad)
+edge_trace_critical = go.Scatter(
+    x=edge_x_critical,
+    y=edge_y_critical,
+    mode="lines",
+    line=dict(width=3.2, color="#c0392b"),
+    hoverinfo="skip",
+    showlegend=False,
+)
 
-ax.margins(x=0.01, y=0.02)
-ax.axis("off")
-fig.subplots_adjust(left=0.01, right=0.99, top=0.99, bottom=0.01)
+x_normal, y_normal, text_normal, hover_normal = [], [], [], []
+x_critical, y_critical, text_critical, hover_critical = [], [], [], []
 
-st.pyplot(fig)
+for n in graph.nodes():
+    x, y = pos[n]
+    label = node_label(graph, n, wrap_width)
+    hover = node_hover(graph, n)
+    if n in critical_nodes:
+        x_critical.append(x)
+        y_critical.append(y)
+        text_critical.append(label)
+        hover_critical.append(hover)
+    else:
+        x_normal.append(x)
+        y_normal.append(y)
+        text_normal.append(label)
+        hover_normal.append(hover)
+
+node_trace_normal = go.Scatter(
+    x=x_normal,
+    y=y_normal,
+    mode="markers+text",
+    text=text_normal,
+    textposition="middle center",
+    textfont=dict(size=text_size, color="#111111"),
+    hovertext=hover_normal,
+    hovertemplate="%{hovertext}<extra></extra>",
+    marker=dict(
+        size=node_size,
+        color="#d6eaf8",
+        line=dict(width=2, color="#1f4e79"),
+    ),
+    showlegend=False,
+)
+
+node_trace_critical = go.Scatter(
+    x=x_critical,
+    y=y_critical,
+    mode="markers+text",
+    text=text_critical,
+    textposition="middle center",
+    textfont=dict(size=text_size, color="#111111"),
+    hovertext=hover_critical,
+    hovertemplate="%{hovertext}<extra></extra>",
+    marker=dict(
+        size=max(node_size + 6, int(node_size * 1.08)),
+        color="#f9d6d5",
+        line=dict(width=2.2, color="#922b21"),
+    ),
+    showlegend=False,
+)
+
+xs = [p[0] for p in pos.values()] if pos else [0]
+ys = [p[1] for p in pos.values()] if pos else [0]
+x_pad = max(0.6, (max(xs) - min(xs)) * 0.03) if len(xs) > 1 else 1
+y_pad = max(0.8, (max(ys) - min(ys)) * 0.15) if len(ys) > 1 else 1
+
+fig = go.Figure(
+    data=[edge_trace_normal, edge_trace_critical, node_trace_normal, node_trace_critical]
+)
+
+fig.update_layout(
+    height=chart_height,
+    margin=dict(l=10, r=10, t=10, b=10),
+    paper_bgcolor="white",
+    plot_bgcolor="white",
+    dragmode="pan",
+    xaxis=dict(
+        visible=False,
+        range=[min(xs) - x_pad, max(xs) + x_pad],
+        fixedrange=False,
+    ),
+    yaxis=dict(
+        visible=False,
+        range=[min(ys) - y_pad, max(ys) + y_pad],
+        fixedrange=False,
+        scaleanchor="x",
+        scaleratio=1,
+    ),
+)
+
+st.plotly_chart(
+    fig,
+    width="stretch",
+    config={
+        "scrollZoom": True,
+        "displaylogo": False,
+        "modeBarButtonsToAdd": ["zoom2d", "pan2d", "resetScale2d"],
+    },
+)
 
 with st.expander("Technological precedence table", expanded=False):
     st.dataframe(outputs["technological_precedence"], width="stretch")
