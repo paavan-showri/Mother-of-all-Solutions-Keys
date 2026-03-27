@@ -1,19 +1,20 @@
 import io
 import math
 import re
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(page_title="Impact vs Effort", layout="wide")
-st.title("Zoomable Impact vs Effort Quadtree")
+st.title("Recursive Impact vs Effort Matrix")
 
 BOTTOM_NOTE = (
-    "This page shows one recursive quadtree level at a time. Dense quadrants are summarized with a count "
-    "bubble so the structure stays readable; click a quadrant bubble to zoom into that node. Sparse quadrants "
-    "show individual activities inside their local subdivision."
+    "This view recursively subdivides each occupied quadrant using the activities inside that quadrant only. "
+    "So after an activity first lands in Quick Wins, Major Projects, Fill-Ins, or Time Sinks, it is evaluated "
+    "again relative to the other activities in that same parent quadrant and placed into a second-level 2×2 split, "
+    "then again for deeper levels until each final box is small enough to show clearly."
 )
 
 QUADRANT_COLORS = {
@@ -23,19 +24,22 @@ QUADRANT_COLORS = {
     "Time Sinks": "#ff4d6d",
 }
 QUADRANT_ORDER = ["Quick Wins", "Major Projects", "Fill-Ins", "Time Sinks"]
+CHILD_FILL = {
+    "Quick Wins": "rgba(15, 157, 154, 0.03)",
+    "Major Projects": "rgba(99, 91, 255, 0.03)",
+    "Fill-Ins": "rgba(47, 120, 255, 0.03)",
+    "Time Sinks": "rgba(255, 77, 109, 0.03)",
+}
 PLOT_BG = "#dcdcdc"
 CELL_LINE = "rgba(65, 105, 155, 0.85)"
-CHILD_FILL = {
-    "Quick Wins": "rgba(15, 157, 154, 0.05)",
-    "Major Projects": "rgba(99, 91, 255, 0.05)",
-    "Fill-Ins": "rgba(47, 120, 255, 0.05)",
-    "Time Sinks": "rgba(255, 77, 109, 0.05)",
-}
-MAX_DEPTH = 6
-POINT_DISPLAY_LIMIT = 10
-COUNT_BUBBLE_SIZE = 44
+MAX_DEPTH = 5
+LEAF_CAPACITY = 6
+POINT_SIZE = 22
 
 
+# ------------------------------
+# Workbook helpers
+# ------------------------------
 def require_upload():
     if "excel_file_bytes" not in st.session_state or "sheet_name" not in st.session_state:
         st.warning("Please upload the Excel file first on the Home page.")
@@ -129,6 +133,9 @@ def load_full_data(file_bytes, sheet_name):
     return df.reset_index(drop=True)
 
 
+# ------------------------------
+# Lean classification logic
+# ------------------------------
 NON_VALUE_ACTIVITY_TEXT = {
     "T": "Transport is non-value-added unless it directly supports transformation.",
     "M": "Handling or motion is non-value-added when it is walking, repositioning, searching, or extra motion.",
@@ -304,6 +311,9 @@ def compute_continuous_scores(df):
     return df
 
 
+# ------------------------------
+# Recursive local quadrant logic
+# ------------------------------
 def child_bounds(bounds: Tuple[float, float, float, float], quadrant: str) -> Tuple[float, float, float, float]:
     xmin, xmax, ymin, ymax = bounds
     xmid = (xmin + xmax) / 2.0
@@ -317,72 +327,86 @@ def child_bounds(bounds: Tuple[float, float, float, float], quadrant: str) -> Tu
     return xmid, xmax, ymin, ymid
 
 
-def path_to_bounds(path: List[str]) -> Tuple[float, float, float, float]:
-    bounds = (0.0, 1.0, 0.0, 1.0)
-    for quad in path:
-        bounds = child_bounds(bounds, quad)
-    return bounds
+def assign_local_quadrants(node_df: pd.DataFrame) -> Tuple[Dict[str, pd.DataFrame], float, float]:
+    if node_df.empty:
+        return {q: node_df.copy() for q in QUADRANT_ORDER}, 0.5, 0.5
+
+    x_split = float(node_df["Effort Score"].median())
+    y_split = float(node_df["Impact Score"].median())
+
+    # Small jitter by Step to avoid too many equal-score ties collapsing into one child.
+    temp = node_df.copy()
+    temp["_jit"] = (temp["Step"].rank(method="dense") % 7) * 1e-6
+    x = temp["Effort Score"] + temp["_jit"]
+    y = temp["Impact Score"] + temp["_jit"]
+
+    groups = {
+        "Quick Wins": temp[(x <= x_split) & (y > y_split)].drop(columns=["_jit"]),
+        "Major Projects": temp[(x > x_split) & (y > y_split)].drop(columns=["_jit"]),
+        "Fill-Ins": temp[(x <= x_split) & (y <= y_split)].drop(columns=["_jit"]),
+        "Time Sinks": temp[(x > x_split) & (y <= y_split)].drop(columns=["_jit"]),
+    }
+    return groups, x_split, y_split
+
+
+def recursive_partition(node_df: pd.DataFrame, bounds: Tuple[float, float, float, float], path: List[str], depth: int,
+                        split_rects: List[Dict], leaves: List[Dict]) -> None:
+    if node_df.empty:
+        return
+
+    if len(node_df) <= LEAF_CAPACITY or depth >= MAX_DEPTH:
+        leaves.append({"df": node_df.copy(), "bounds": bounds, "path": path[:]})
+        return
+
+    child_groups, x_split, y_split = assign_local_quadrants(node_df)
+
+    # If all activities still collapse into one child, stop recursion to avoid a visually useless chain.
+    non_empty_counts = sum(1 for q in QUADRANT_ORDER if not child_groups[q].empty)
+    if non_empty_counts <= 1:
+        leaves.append({"df": node_df.copy(), "bounds": bounds, "path": path[:]})
+        return
+
+    split_rects.append({
+        "bounds": bounds,
+        "path": path[:],
+        "counts": {q: len(child_groups[q]) for q in QUADRANT_ORDER},
+        "x_split": x_split,
+        "y_split": y_split,
+    })
+
+    for quad in QUADRANT_ORDER:
+        quad_df = child_groups[quad]
+        if quad_df.empty:
+            continue
+        recursive_partition(
+            quad_df,
+            child_bounds(bounds, quad),
+            path + [quad],
+            depth + 1,
+            split_rects,
+            leaves,
+        )
 
 
 def path_label(path: List[str]) -> str:
     return "Root" if not path else " > ".join(path)
 
 
-def score_to_path(effort_score: float, impact_score: float, levels: int) -> List[str]:
-    path = []
-    bounds = (0.0, 1.0, 0.0, 1.0)
-    for _ in range(levels):
-        xmin, xmax, ymin, ymax = bounds
-        xmid = (xmin + xmax) / 2.0
-        ymid = (ymin + ymax) / 2.0
-        if effort_score <= xmid and impact_score > ymid:
-            quad = "Quick Wins"
-        elif effort_score > xmid and impact_score > ymid:
-            quad = "Major Projects"
-        elif effort_score <= xmid and impact_score <= ymid:
-            quad = "Fill-Ins"
-        else:
-            quad = "Time Sinks"
-        path.append(quad)
-        bounds = child_bounds(bounds, quad)
-    return path
-
-
-def assign_recursive_paths(df: pd.DataFrame, levels: int) -> pd.DataFrame:
-    temp = df.copy()
-    temp["Recursive Path List"] = temp.apply(
-        lambda row: score_to_path(float(row["Effort Score"]), float(row["Impact Score"]), levels),
-        axis=1,
-    )
-    temp["Recursive Path"] = temp["Recursive Path List"].apply(lambda x: " > ".join(x))
-    return temp
-
-
-def path_starts_with(full_path: List[str], prefix: List[str]) -> bool:
-    return full_path[: len(prefix)] == prefix
-
-
-def get_node_df(df: pd.DataFrame, focus_path: List[str]) -> pd.DataFrame:
-    return df[df["Recursive Path List"].apply(lambda p: path_starts_with(p, focus_path))].copy()
-
-
-def get_child_df(df: pd.DataFrame, focus_path: List[str], child_name: str) -> pd.DataFrame:
-    child_path = focus_path + [child_name]
-    return df[df["Recursive Path List"].apply(lambda p: path_starts_with(p, child_path))].copy()
-
-
-def assign_points_in_bounds(df: pd.DataFrame, bounds: Tuple[float, float, float, float]) -> pd.DataFrame:
+def assign_points_in_leaf(df: pd.DataFrame, bounds: Tuple[float, float, float, float]) -> pd.DataFrame:
     temp = df.sort_values(["Impact Score", "Effort Score", "Step"], ascending=[False, True, True]).reset_index(drop=True).copy()
     n = len(temp)
     if n == 0:
         return temp
+
     xmin, xmax, ymin, ymax = bounds
     cols = math.ceil(math.sqrt(n))
     rows = math.ceil(n / cols)
-    pad_x = max((xmax - xmin) * 0.10, 0.005)
-    pad_y = max((ymax - ymin) * 0.10, 0.005)
+
+    pad_x = max((xmax - xmin) * 0.10, 0.004)
+    pad_y = max((ymax - ymin) * 0.10, 0.004)
     ux0, ux1 = xmin + pad_x, xmax - pad_x
     uy0, uy1 = ymin + pad_y, ymax - pad_y
+
     xs, ys = [], []
     for i in range(n):
         r = i // cols
@@ -391,112 +415,70 @@ def assign_points_in_bounds(df: pd.DataFrame, bounds: Tuple[float, float, float,
         y = uy1 - (r + 0.5) * (uy1 - uy0) / rows
         xs.append(x)
         ys.append(y)
+
     temp["x"] = xs
     temp["y"] = ys
     return temp
 
 
-def get_child_summary(df: pd.DataFrame, focus_path: List[str]) -> pd.DataFrame:
-    parent_bounds = path_to_bounds(focus_path)
-    rows = []
+def build_recursive_structure(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict], pd.DataFrame]:
+    root_groups, _, _ = assign_local_quadrants(df)
+    split_rects: List[Dict] = []
+    leaves: List[Dict] = []
     for quad in QUADRANT_ORDER:
-        child_df = get_child_df(df, focus_path, quad)
-        bounds = child_bounds(parent_bounds, quad)
-        rows.append({
-            "Quadrant": quad,
-            "Count": len(child_df),
-            "bounds": bounds,
-            "path": focus_path + [quad],
-            "Avg Impact Score": None if child_df.empty else float(child_df["Impact Score"].mean()),
-            "Avg Effort Score": None if child_df.empty else float(child_df["Effort Score"].mean()),
-            "Show Points": len(child_df) <= POINT_DISPLAY_LIMIT,
-        })
-    return pd.DataFrame(rows)
-
-
-def build_focus_plot_df(df: pd.DataFrame, focus_path: List[str], child_summary: pd.DataFrame) -> pd.DataFrame:
-    pieces = []
-    for _, row in child_summary.iterrows():
-        if not row["Show Points"] or row["Count"] == 0:
+        quad_df = root_groups[quad]
+        if quad_df.empty:
             continue
-        child_df = get_child_df(df, focus_path, row["Quadrant"])
-        placed = assign_points_in_bounds(child_df, row["bounds"])
-        placed["Visible Child"] = row["Quadrant"]
-        pieces.append(placed)
-    if not pieces:
-        return pd.DataFrame()
-    return pd.concat(pieces, ignore_index=True)
+        recursive_partition(quad_df, child_bounds((0.0, 1.0, 0.0, 1.0), quad), [quad], 1, split_rects, leaves)
+
+    leaf_frames = []
+    for leaf in leaves:
+        placed = assign_points_in_leaf(leaf["df"], leaf["bounds"])
+        placed["Recursive Path"] = path_label(leaf["path"])
+        placed["Top Quadrant"] = leaf["path"][0] if leaf["path"] else "Root"
+        leaf_frames.append(placed)
+    plot_df = pd.concat(leaf_frames, ignore_index=True) if leaf_frames else pd.DataFrame()
+    return split_rects, leaves, plot_df
 
 
-def add_child_rectangles(fig: go.Figure, child_summary: pd.DataFrame):
-    for _, row in child_summary.iterrows():
-        xmin, xmax, ymin, ymax = row["bounds"]
-        quad = row["Quadrant"]
+# ------------------------------
+# Plotting helpers
+# ------------------------------
+def add_top_level_rectangles(fig: go.Figure):
+    root_bounds = (0.0, 1.0, 0.0, 1.0)
+    for quad in QUADRANT_ORDER:
+        xmin, xmax, ymin, ymax = child_bounds(root_bounds, quad)
         fig.add_shape(
             type="rect",
             x0=xmin,
             x1=xmax,
             y0=ymin,
             y1=ymax,
-            line=dict(color=CELL_LINE, width=1.5),
+            line=dict(color=CELL_LINE, width=1.6),
             fillcolor=CHILD_FILL[quad],
             layer="below",
         )
 
 
-def add_cell_labels(fig: go.Figure, child_summary: pd.DataFrame):
-    for _, row in child_summary.iterrows():
-        xmin, xmax, ymin, ymax = row["bounds"]
-        quad = row["Quadrant"]
-        count = int(row["Count"])
-        fig.add_annotation(
-            x=xmin + 0.02 * (xmax - xmin) + xmin * 0,
-            y=ymax - 0.08 * (ymax - ymin),
-            text=f"{quad}<br>{count}",
-            showarrow=False,
-            xanchor="left",
-            yanchor="top",
-            font=dict(size=14, color=QUADRANT_COLORS[quad]),
-            align="left",
-        )
+def add_recursive_rectangles(fig: go.Figure, split_rects: List[Dict]):
+    for node in split_rects:
+        xmin, xmax, ymin, ymax = node["bounds"]
+        xmid = (xmin + xmax) / 2.0
+        ymid = (ymin + ymax) / 2.0
+        fig.add_shape(type="line", x0=xmid, x1=xmid, y0=ymin, y1=ymax, line=dict(color=CELL_LINE, width=1.0))
+        fig.add_shape(type="line", x0=xmin, x1=xmax, y0=ymid, y1=ymid, line=dict(color=CELL_LINE, width=1.0))
 
 
-def add_click_targets(fig: go.Figure, child_summary: pd.DataFrame):
-    centers_x, centers_y, labels, custom = [], [], [], []
-    for _, row in child_summary.iterrows():
-        xmin, xmax, ymin, ymax = row["bounds"]
-        count = int(row["Count"])
-        quad = row["Quadrant"]
-        centers_x.append((xmin + xmax) / 2.0)
-        centers_y.append((ymin + ymax) / 2.0)
-        labels.append(str(count) if count > POINT_DISPLAY_LIMIT else "")
-        custom.append(["cell", quad, " > ".join(row["path"]), count])
-    fig.add_trace(
-        go.Scatter(
-            x=centers_x,
-            y=centers_y,
-            mode="markers+text",
-            text=labels,
-            textposition="middle center",
-            textfont=dict(size=16, color="black"),
-            marker=dict(
-                size=[COUNT_BUBBLE_SIZE if int(c[3]) > POINT_DISPLAY_LIMIT else 26 for c in custom],
-                color=[QUADRANT_COLORS[c[1]] if int(c[3]) > POINT_DISPLAY_LIMIT else "rgba(0,0,0,0)" for c in custom],
-                opacity=[0.18 if int(c[3]) > POINT_DISPLAY_LIMIT else 0.01 for c in custom],
-                line=dict(color=[QUADRANT_COLORS[c[1]] for c in custom], width=2),
-            ),
-            customdata=custom,
-            hovertemplate="Click to zoom into %{customdata[1]}<br>Count: %{customdata[3]}<extra></extra>",
-            showlegend=False,
-        )
-    )
+def add_global_crosshair(fig: go.Figure):
+    fig.add_shape(type="line", x0=0.5, x1=0.5, y0=0.0, y1=1.0, line=dict(color="gray", dash="dash", width=1.4))
+    fig.add_shape(type="line", x0=0.0, x1=1.0, y0=0.5, y1=0.5, line=dict(color="gray", dash="dash", width=1.4))
 
 
 def add_activity_traces(fig: go.Figure, plot_df: pd.DataFrame, selected_step=None):
     if plot_df.empty:
         return
     for quad in QUADRANT_ORDER:
-        temp = plot_df[plot_df["Visible Child"] == quad].copy().reset_index(drop=True)
+        temp = plot_df[plot_df["Top Quadrant"] == quad].copy().reset_index(drop=True)
         if temp.empty:
             continue
         selected_points = None
@@ -510,10 +492,10 @@ def add_activity_traces(fig: go.Figure, plot_df: pd.DataFrame, selected_step=Non
                 text=temp["Step"].astype(str),
                 textposition="middle center",
                 textfont=dict(size=9, color="black"),
-                marker=dict(size=22, color="rgba(255,255,255,0)", line=dict(color=QUADRANT_COLORS[quad], width=2)),
+                marker=dict(size=POINT_SIZE, color="rgba(255,255,255,0)", line=dict(color=QUADRANT_COLORS[quad], width=2)),
                 customdata=temp[[
                     "Step", "Description", "Activity", "Therblig / Motion Type", "Motion Class",
-                    "Impact Score", "Effort Score", "Recursive Path", "Visible Child"
+                    "Impact Score", "Effort Score", "Recursive Path", "Quadrant"
                 ]].values,
                 hovertemplate=(
                     "Step: %{customdata[0]}"
@@ -524,75 +506,49 @@ def add_activity_traces(fig: go.Figure, plot_df: pd.DataFrame, selected_step=Non
                     "<br>Impact Score: %{customdata[5]:.3f}"
                     "<br>Effort Score: %{customdata[6]:.3f}"
                     "<br>Recursive Path: %{customdata[7]}"
+                    "<br>Top-Level Quadrant: %{customdata[8]}"
                     "<extra></extra>"
                 ),
                 selectedpoints=selected_points,
                 selected=dict(marker=dict(size=28, color="black", opacity=1.0)),
-                unselected=dict(marker=dict(opacity=0.85)),
+                unselected=dict(marker=dict(opacity=0.88)),
                 showlegend=False,
             )
         )
 
 
-def add_global_crosshair(fig: go.Figure):
-    fig.add_shape(type="line", x0=0.5, x1=0.5, y0=0.0, y1=1.0, line=dict(color="gray", dash="dash", width=1.4))
-    fig.add_shape(type="line", x0=0.0, x1=1.0, y0=0.5, y1=0.5, line=dict(color="gray", dash="dash", width=1.4))
-
-
-def make_impact_effort_matrix(df, focus_path: List[str], selected_step=None):
-    df = df.copy()
-    df[["Therblig / Motion Type", "Motion Class"]] = df.apply(
-        lambda row: pd.Series(classify_therblig(row["Description"], row["Activity"], row["Activity Type"])),
-        axis=1,
-    )
-    df["Impact"] = df.apply(classify_impact, axis=1)
-    df["Effort"] = df.apply(classify_effort, axis=1)
-    df["Quadrant"] = df.apply(get_quadrant, axis=1)
-    df["Lean / Six Sigma Logic"] = df.apply(build_logic_text, axis=1)
-    df = compute_continuous_scores(df.sort_values("Step").reset_index(drop=True))
-    df = assign_recursive_paths(df, MAX_DEPTH)
-
-    child_summary = get_child_summary(df, focus_path)
-    node_df = get_node_df(df, focus_path)
-    plot_df = build_focus_plot_df(df, focus_path, child_summary)
-
-    fig = go.Figure()
-    add_child_rectangles(fig, child_summary)
-    add_global_crosshair(fig)
-    add_cell_labels(fig, child_summary)
-    add_click_targets(fig, child_summary)
-    add_activity_traces(fig, plot_df, selected_step=selected_step)
-
-    focus_title = f"Focus: {path_label(focus_path)}"
-    subtitle = "Click a dense quadrant bubble to expand it. Sparse quadrants already show activity markers."
+def add_axis_and_titles(fig: go.Figure):
     annotations = [
-        dict(x=0.50, y=1.06, xref="paper", yref="paper", text="Zoomable Impact vs Effort Quadtree", showarrow=False, font=dict(size=22, color="black")),
-        dict(x=0.50, y=1.02, xref="paper", yref="paper", text=focus_title, showarrow=False, font=dict(size=15, color="black")),
-        dict(x=0.50, y=0.99, xref="paper", yref="paper", text=subtitle, showarrow=False, font=dict(size=12, color="#333333")),
+        dict(x=0.50, y=1.05, xref="paper", yref="paper", text="Recursive Impact vs Effort Matrix", showarrow=False, font=dict(size=22, color="black")),
         dict(x=0.50, y=0.01, xref="paper", yref="paper", text="Effort", showarrow=False, font=dict(size=18, color="black")),
         dict(x=0.01, y=0.50, xref="paper", yref="paper", text="Impact", showarrow=False, textangle=-90, font=dict(size=18, color="black")),
         dict(x=0.05, y=0.24, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=13, color="black")),
         dict(x=0.05, y=0.76, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=13, color="black")),
         dict(x=0.24, y=0.05, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=13, color="black")),
         dict(x=0.76, y=0.05, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=13, color="black")),
+        dict(x=0.26, y=0.96, xref="paper", yref="paper", text="Quick Wins", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Quick Wins"])),
+        dict(x=0.74, y=0.96, xref="paper", yref="paper", text="Major Projects", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Major Projects"])),
+        dict(x=0.26, y=0.08, xref="paper", yref="paper", text="Fill-Ins", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Fill-Ins"])),
+        dict(x=0.74, y=0.08, xref="paper", yref="paper", text="Time Sinks", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Time Sinks"])),
     ]
-
     fig.update_layout(
         xaxis=dict(range=[0, 1], visible=False, fixedrange=True),
         yaxis=dict(range=[0, 1], visible=False, fixedrange=True, scaleanchor="x", scaleratio=1),
         plot_bgcolor=PLOT_BG,
         paper_bgcolor=PLOT_BG,
-        height=900,
+        height=920,
         margin=dict(l=70, r=30, t=90, b=60),
         clickmode="event+select",
         dragmode=False,
         annotations=annotations,
     )
-    return fig, df, node_df, child_summary
 
 
-def build_rcpsp_priority_table(df: pd.DataFrame, focus_path: List[str]) -> pd.DataFrame:
-    temp = get_node_df(df, focus_path).copy()
+# ------------------------------
+# Tables and selection
+# ------------------------------
+def build_rcpsp_priority_table(df: pd.DataFrame) -> pd.DataFrame:
+    temp = df.copy()
     temp["Quadrant Weight"] = temp["Quadrant"].map({"Quick Wins": 4, "Major Projects": 3, "Fill-Ins": 2, "Time Sinks": 1}).fillna(1)
     temp["RCPSP Priority Score"] = 0.45 * temp["Quadrant Weight"] + 0.35 * temp["Impact Score"] - 0.20 * temp["Effort Score"]
     temp = temp.sort_values(["RCPSP Priority Score", "Impact Score", "Effort Score", "Step"], ascending=[False, False, True, True]).reset_index(drop=True)
@@ -608,24 +564,64 @@ def style_logic_table(df, selected_step=None):
     return df.style.apply(highlight_row, axis=1)
 
 
-def get_selected_payload_from_event(event):
+def get_selected_step_from_event(event):
     if not event:
         return None
     selection = event.get("selection", {}) if isinstance(event, dict) else getattr(event, "selection", {})
     points = selection.get("points", []) if hasattr(selection, "get") else []
     if not points:
         return None
-    return points[0].get("customdata", None)
+    customdata = points[0].get("customdata", [])
+    if not customdata:
+        return None
+    try:
+        return int(customdata[0])
+    except Exception:
+        return None
+
+
+# ------------------------------
+# Build full page data and figure
+# ------------------------------
+def make_impact_effort_matrix(df: pd.DataFrame, selected_step=None):
+    temp = df.copy()
+    temp[["Therblig / Motion Type", "Motion Class"]] = temp.apply(
+        lambda row: pd.Series(classify_therblig(row["Description"], row["Activity"], row["Activity Type"])),
+        axis=1,
+    )
+    temp["Impact"] = temp.apply(classify_impact, axis=1)
+    temp["Effort"] = temp.apply(classify_effort, axis=1)
+    temp["Quadrant"] = temp.apply(get_quadrant, axis=1)
+    temp["Lean / Six Sigma Logic"] = temp.apply(build_logic_text, axis=1)
+    temp = compute_continuous_scores(temp.sort_values("Step").reset_index(drop=True))
+
+    split_rects, leaves, plot_df = build_recursive_structure(temp)
+
+    # Attach recursive path back to full table.
+    if not plot_df.empty:
+        path_map = plot_df[["Step", "Recursive Path"]].drop_duplicates()
+        temp = temp.merge(path_map, on="Step", how="left")
+    else:
+        temp["Recursive Path"] = ""
+
+    fig = go.Figure()
+    add_top_level_rectangles(fig)
+    add_recursive_rectangles(fig, split_rects)
+    add_global_crosshair(fig)
+    add_activity_traces(fig, plot_df, selected_step=selected_step)
+    add_axis_and_titles(fig)
+
+    return fig, temp, leaves
 
 
 st.markdown(
     """
-**How this zoomable view works**
+**How this recursive view works**
 
-- The matrix is split into **Quick Wins, Major Projects, Fill-Ins, and Time Sinks** at each level.
-- Dense child quadrants are shown as a **count bubble** so the structure stays readable.
-- Click a count bubble to zoom deeper into that child quadrant.
-- Sparse child quadrants show the actual activity steps directly.
+- The first split classifies activities into **Quick Wins, Major Projects, Fill-Ins, and Time Sinks**.
+- Inside each occupied quadrant, the activities in that quadrant are split **again** into a local 2×2 matrix using only that quadrant's own activities.
+- The same logic repeats until the final boxes are small enough to display clearly.
+- This lets you see, for example, which activities inside **Major Projects** are the more urgent local quick wins versus the lower-value local time sinks.
 """
 )
 
@@ -635,27 +631,8 @@ try:
 
     if "impact_effort_selected_step" not in st.session_state:
         st.session_state["impact_effort_selected_step"] = None
-    if "impact_effort_focus_path" not in st.session_state:
-        st.session_state["impact_effort_focus_path"] = []
 
-    focus_path = st.session_state["impact_effort_focus_path"]
-    fig, full_df, node_df, child_summary = make_impact_effort_matrix(
-        df,
-        focus_path=focus_path,
-        selected_step=st.session_state["impact_effort_selected_step"],
-    )
-
-    nav1, nav2, nav3 = st.columns([1, 1, 2])
-    with nav1:
-        if st.button("Back one level", use_container_width=True, disabled=(len(focus_path) == 0)):
-            st.session_state["impact_effort_focus_path"] = focus_path[:-1]
-            st.rerun()
-    with nav2:
-        if st.button("Reset to root", use_container_width=True):
-            st.session_state["impact_effort_focus_path"] = []
-            st.rerun()
-    with nav3:
-        st.caption(f"Current focus path: {path_label(focus_path)}")
+    fig, full_df, leaves = make_impact_effort_matrix(df, selected_step=st.session_state["impact_effort_selected_step"])
 
     chart_event = st.plotly_chart(
         fig,
@@ -667,28 +644,30 @@ try:
         config={"scrollZoom": False, "displayModeBar": False},
     )
 
-    payload = get_selected_payload_from_event(chart_event)
-    if payload is not None:
-        if payload[0] == "cell":
-            clicked_quad = payload[1]
-            clicked_count = int(payload[3])
-            if clicked_count > 0 and len(focus_path) < MAX_DEPTH:
-                st.session_state["impact_effort_focus_path"] = focus_path + [clicked_quad]
-                st.rerun()
-        else:
-            st.session_state["impact_effort_selected_step"] = int(payload[0])
-            st.rerun()
+    clicked_step = get_selected_step_from_event(chart_event)
+    if clicked_step is not None:
+        st.session_state["impact_effort_selected_step"] = clicked_step
+        st.rerun()
 
-    st.markdown(f"<div style='margin-top: 10px; font-size: 14px; color: black; text-align: justify;'>{BOTTOM_NOTE}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div style='margin-top: 10px; font-size: 14px; color: black; text-align: justify;'>{BOTTOM_NOTE}</div>",
+        unsafe_allow_html=True,
+    )
 
-    st.markdown("### Visible subdivision summary")
-    summary_df = child_summary[["Quadrant", "Count", "Avg Impact Score", "Avg Effort Score", "Show Points"]].copy()
-    summary_df["Avg Impact Score"] = summary_df["Avg Impact Score"].round(3)
-    summary_df["Avg Effort Score"] = summary_df["Avg Effort Score"].round(3)
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    st.markdown("### Recursive leaf summary")
+    leaf_rows = []
+    for leaf in leaves:
+        leaf_rows.append({
+            "Recursive Path": path_label(leaf["path"]),
+            "Activity Count": len(leaf["df"]),
+            "Min Step": int(leaf["df"]["Step"].min()),
+            "Max Step": int(leaf["df"]["Step"].max()),
+        })
+    leaf_df = pd.DataFrame(leaf_rows).sort_values(["Recursive Path", "Activity Count"], ascending=[True, False]) if leaf_rows else pd.DataFrame()
+    st.dataframe(leaf_df, use_container_width=True, hide_index=True)
 
-    st.markdown("### RCPSP auto-priority list for the current focus")
-    rcpsp_df = build_rcpsp_priority_table(full_df, focus_path)
+    st.markdown("### RCPSP auto-priority list")
+    rcpsp_df = build_rcpsp_priority_table(full_df)
     rcpsp_df[["Impact Score", "Effort Score", "RCPSP Priority Score"]] = rcpsp_df[["Impact Score", "Effort Score", "RCPSP Priority Score"]].round(3)
     st.dataframe(rcpsp_df, use_container_width=True, hide_index=True)
 
@@ -719,6 +698,6 @@ try:
     if st.session_state.get("impact_effort_selected_step") is not None:
         st.caption(f"Selected marker: Step {st.session_state['impact_effort_selected_step']}. The matching row is highlighted below.")
     else:
-        st.caption("Click a quadrant bubble to zoom deeper, or click an activity marker to highlight its row.")
+        st.caption("Click an activity marker to highlight its matching row in the table.")
 except Exception as e:
     st.error(f"Error: {e}")
