@@ -58,7 +58,7 @@ with controls[3]:
 with controls[4]:
     x_gap = st.slider("Horizontal spacing", min_value=1.8, max_value=7.0, value=3.0, step=0.1)
 with controls[5]:
-    y_gap = st.slider("Base vertical spacing", min_value=1.5, max_value=8.0, value=3.2, step=0.1)
+    y_gap = st.slider("Base vertical spacing", min_value=12.0, max_value=16.0, value=3.2, step=0.1)
 with controls[6]:
     lane_spread = st.slider("Lane spread multiplier", min_value=1.0, max_value=3.0, value=1.6, step=0.1)
 with controls[7]:
