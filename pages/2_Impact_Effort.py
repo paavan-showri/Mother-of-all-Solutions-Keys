@@ -1,26 +1,34 @@
 import io
 import math
 import re
-from typing import List, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(page_title="Impact vs Effort", layout="wide")
-st.title("Impact vs Effort Matrix")
+st.title("Recursive Impact vs Effort Matrix")
 
 BOTTOM_NOTE = (
-    "This page uses a recursive Impact–Effort decomposition instead of a flat 2×2 matrix. "
-    "Each region is repeatedly split into four sub-regions like a quadtree, so dense clusters of activities "
-    "become visible at finer levels. Impact is estimated from therblig effectiveness, value-added behavior, "
-    "and activity meaning, while effort is estimated from duration, motion burden, and resource complexity."
+    "This recursive matrix keeps the same Lean logic as the original impact–effort view, "
+    "but instead of placing all activities into only one flat 2×2 matrix, each quadrant is "
+    "subdivided again into Quick Wins, Major Projects, Fill-Ins, and Time Sinks. This allows "
+    "activities to be positioned more precisely within the same impact-versus-effort concept. "
+    "The recursive boxes are driven by continuous impact and effort scores derived from therblig "
+    "classification, Lean waste logic, duration, and resource complexity."
 )
 
+QUADRANT_COLORS = {
+    "Quick Wins": "#1b9e9a",
+    "Major Projects": "#6c63ff",
+    "Fill-Ins": "#3b82f6",
+    "Time Sinks": "#ff4d6d",
+}
 
-# -------------------------
-# Workbook helpers
-# -------------------------
+CELL_FILL = "rgba(68, 95, 127, 0.12)"
+CELL_LINE = "rgba(80, 110, 145, 0.65)"
+
+
 def require_upload():
     if "excel_file_bytes" not in st.session_state or "sheet_name" not in st.session_state:
         st.warning("Please upload the Excel file first on the Home page.")
@@ -116,37 +124,61 @@ def load_full_data(file_bytes, sheet_name):
     return df.reset_index(drop=True)
 
 
-# -------------------------
-# Rule engine
-# -------------------------
 NON_VALUE_ACTIVITY_TEXT = {
     "T": "Transport is non-value-added unless it directly supports transformation.",
-    "M": "Handling or motion is non-value-added when it is walking, repositioning, searching, or extra motion.",
+    "M": "Handling/motion is non-value-added when it is walking, repositioning, searching, or other extra motion.",
     "I": "Inspection is generally non-value-added from the customer perspective.",
-    "W": "Waiting or delay is a classic Lean waste.",
+    "W": "Waiting/delay is a classic Lean waste.",
     "S": "Storage represents inventory waste.",
-    "D": "Decision or planning does not directly transform the product.",
+    "D": "Decision/planning does not directly transform the product.",
 }
 
 
-THERBLIG_IMPACT_BASE = {
-    "Search": 0.12,
-    "Delay": 0.05,
-    "Walk/Transport Empty": 0.15,
-    "Reorient/Extra Motion": 0.18,
-    "Reposition/Relocate": 0.22,
-    "Position": 0.25,
-    "Hold": 0.20,
-    "Inspect/Check": 0.18,
-    "Plan/Decision": 0.16,
-    "Non-Value Motion": 0.14,
-    "Grasp": 0.70,
-    "Release Load / Pre-Position": 0.68,
-    "Use": 0.88,
-    "Use / Disassemble": 0.82,
-    "Assemble": 0.92,
-    "Move": 0.72,
-    "Unclassified": 0.30,
+THERBLIG_IMPACT_ADJUST = {
+    "Search": -0.18,
+    "Delay": -0.20,
+    "Walk/Transport Empty": -0.18,
+    "Reorient/Extra Motion": -0.14,
+    "Reposition/Relocate": -0.12,
+    "Position": -0.10,
+    "Hold": -0.10,
+    "Inspect/Check": -0.14,
+    "Plan/Decision": -0.15,
+    "Non-Value Motion": -0.15,
+    "Grasp": 0.05,
+    "Release Load / Pre-Position": 0.05,
+    "Use": 0.12,
+    "Use / Disassemble": 0.10,
+    "Assemble": 0.12,
+    "Move": 0.04,
+    "Unclassified": -0.05,
+}
+
+
+THERBLIG_EFFORT_ADJUST = {
+    "Search": 0.20,
+    "Delay": 0.20,
+    "Walk/Transport Empty": 0.18,
+    "Reorient/Extra Motion": 0.12,
+    "Reposition/Relocate": 0.10,
+    "Position": 0.06,
+    "Hold": 0.07,
+    "Inspect/Check": 0.10,
+    "Plan/Decision": 0.10,
+    "Non-Value Motion": 0.12,
+    "Grasp": 0.03,
+    "Release Load / Pre-Position": 0.03,
+    "Use": 0.08,
+    "Use / Disassemble": 0.09,
+    "Assemble": 0.10,
+    "Move": 0.06,
+    "Unclassified": 0.05,
+}
+
+
+LOW_IMPACT_THERBLIGS = {
+    "Search", "Delay", "Walk/Transport Empty", "Reorient/Extra Motion", "Reposition/Relocate",
+    "Position", "Hold", "Inspect/Check", "Plan/Decision", "Non-Value Motion"
 }
 
 
@@ -216,10 +248,7 @@ def classify_impact(row):
 
     if activity in {"I", "W", "S", "D"}:
         return "Low"
-    if therblig in {
-        "Search", "Delay", "Walk/Transport Empty", "Reorient/Extra Motion", "Reposition/Relocate",
-        "Position", "Hold", "Inspect/Check", "Plan/Decision", "Non-Value Motion"
-    }:
+    if therblig in LOW_IMPACT_THERBLIGS:
         return "Low"
     if motion_class == "Effective":
         return "High"
@@ -261,42 +290,6 @@ def get_quadrant(row):
     return "Time Sinks"
 
 
-def compute_scores(df):
-    df = df.copy()
-
-    max_duration = max(float(df["Duration Seconds"].max()), 1.0)
-    max_resources = max(float(df["Resource Count"].max()), 1.0)
-
-    duration_norm = (df["Duration Seconds"] / max_duration).clip(0, 1)
-    resource_norm = (df["Resource Count"] / max_resources).clip(0, 1)
-
-    waste_bonus = df["Therblig / Motion Type"].map({
-        "Search": 0.22,
-        "Delay": 0.30,
-        "Walk/Transport Empty": 0.22,
-        "Inspect/Check": 0.14,
-        "Reorient/Extra Motion": 0.16,
-        "Reposition/Relocate": 0.14,
-        "Plan/Decision": 0.12,
-        "Non-Value Motion": 0.14,
-    }).fillna(0.0)
-
-    motion_penalty = df["Motion Class"].map({"Effective": 0.10, "Ineffective": 0.0}).fillna(0.0)
-    va_bonus = df["Activity Type"].map({"VA": 0.08, "NNVA": 0.03, "NVA": 0.0}).fillna(0.0)
-
-    impact_base = df["Therblig / Motion Type"].map(THERBLIG_IMPACT_BASE).fillna(0.30)
-    df["Impact Score"] = (impact_base + va_bonus - 0.05 * duration_norm).clip(0.02, 0.98)
-
-    df["Effort Score"] = (
-        0.62 * duration_norm +
-        0.20 * resource_norm +
-        waste_bonus -
-        motion_penalty
-    ).clip(0.02, 0.98)
-
-    return df
-
-
 def build_logic_text(row):
     reasons = []
     activity = row["Activity"]
@@ -317,94 +310,172 @@ def build_logic_text(row):
         reasons.append("Multiple resources increase complexity.")
     elif row["Resource Count"] >= 3:
         reasons.append("Several resources are involved.")
-    reasons.append(
-        f"Scores → Impact={row['Impact Score']:.2f}, Effort={row['Effort Score']:.2f}."
-    )
     return " ".join(reasons)
 
 
-# -------------------------
-# Quadtree helpers
-# -------------------------
-Cell = Tuple[pd.DataFrame, float, float, float, float, int]
+def compute_continuous_scores(df):
+    df = df.copy()
+    max_duration = max(float(df["Duration Seconds"].max()), 1.0)
+    max_resources = max(int(df["Resource Count"].max()), 1)
+
+    duration_norm = (df["Duration Seconds"] / max_duration).clip(0, 1)
+    resource_norm = (df["Resource Count"] / max_resources).clip(0, 1)
+
+    impact_base = df["Impact"].map({"High": 0.74, "Low": 0.26}).fillna(0.26)
+    effort_base = df["Effort"].map({"High": 0.74, "Low": 0.26}).fillna(0.26)
+
+    impact_adjust = df["Therblig / Motion Type"].map(THERBLIG_IMPACT_ADJUST).fillna(0.0)
+    effort_adjust = df["Therblig / Motion Type"].map(THERBLIG_EFFORT_ADJUST).fillna(0.0)
+
+    activity_type_adjust = df["Activity Type"].map({"VA": 0.08, "NNVA": -0.02, "NVA": -0.08}).fillna(0.0)
+    motion_adjust = df["Motion Class"].map({"Effective": 0.05, "Ineffective": -0.05}).fillna(0.0)
+
+    df["Impact Score"] = (
+        impact_base + impact_adjust + activity_type_adjust + motion_adjust - 0.04 * duration_norm + 0.02 * resource_norm
+    ).clip(0.02, 0.98)
+
+    df["Effort Score"] = (
+        effort_base + effort_adjust + 0.18 * duration_norm + 0.10 * resource_norm
+    ).clip(0.02, 0.98)
+
+    return df
 
 
-def quadtree_partition(
-    df: pd.DataFrame,
-    x_min: float,
-    x_max: float,
-    y_min: float,
-    y_max: float,
-    depth: int,
-    max_depth: int,
-    min_points: int,
-) -> List[Cell]:
+def choose_depth(n_points):
+    if n_points <= 16:
+        return 2
+    if n_points <= 64:
+        return 3
+    if n_points <= 180:
+        return 4
+    return 5
+
+
+def recursive_quadtree(df, xmin, xmax, ymin, ymax, depth, max_depth):
     if df.empty:
         return []
-    if len(df) <= min_points or depth >= max_depth:
-        return [(df.copy(), x_min, x_max, y_min, y_max, depth)]
+    if depth >= max_depth or len(df) <= 3:
+        return [(df.copy(), xmin, xmax, ymin, ymax, depth)]
 
-    x_mid = (x_min + x_max) / 2
-    y_mid = (y_min + y_max) / 2
+    xmid = (xmin + xmax) / 2.0
+    ymid = (ymin + ymax) / 2.0
 
-    upper_left = df[(df["Effort Score"] <= x_mid) & (df["Impact Score"] > y_mid)]
-    upper_right = df[(df["Effort Score"] > x_mid) & (df["Impact Score"] > y_mid)]
-    lower_left = df[(df["Effort Score"] <= x_mid) & (df["Impact Score"] <= y_mid)]
-    lower_right = df[(df["Effort Score"] > x_mid) & (df["Impact Score"] <= y_mid)]
+    q_quick = df[(df["Effort Score"] <= xmid) & (df["Impact Score"] > ymid)].copy()
+    q_major = df[(df["Effort Score"] > xmid) & (df["Impact Score"] > ymid)].copy()
+    q_fill = df[(df["Effort Score"] <= xmid) & (df["Impact Score"] <= ymid)].copy()
+    q_sink = df[(df["Effort Score"] > xmid) & (df["Impact Score"] <= ymid)].copy()
 
-    quadrants = [
-        (upper_left, x_min, x_mid, y_mid, y_max),
-        (upper_right, x_mid, x_max, y_mid, y_max),
-        (lower_left, x_min, x_mid, y_min, y_mid),
-        (lower_right, x_mid, x_max, y_min, y_mid),
+    children = [
+        (q_quick, xmin, xmid, ymid, ymax),
+        (q_major, xmid, xmax, ymid, ymax),
+        (q_fill, xmin, xmid, ymin, ymid),
+        (q_sink, xmid, xmax, ymin, ymid),
     ]
 
-    result: List[Cell] = []
-    for sub_df, sx0, sx1, sy0, sy1 in quadrants:
-        if sub_df.empty:
+    non_empty_children = [(child_df, a, b, c, d) for child_df, a, b, c, d in children if not child_df.empty]
+    if len(non_empty_children) <= 1:
+        return [(df.copy(), xmin, xmax, ymin, ymax, depth)]
+
+    leaves = []
+    for child_df, a, b, c, d in children:
+        if child_df.empty:
             continue
-        result.extend(quadtree_partition(sub_df, sx0, sx1, sy0, sy1, depth + 1, max_depth, min_points))
-    return result
+        leaves.extend(recursive_quadtree(child_df, a, b, c, d, depth + 1, max_depth))
+    return leaves
 
 
 def assign_positions_in_cell(df, xmin, xmax, ymin, ymax):
-    df = df.sort_values(["Step", "Effort Score", "Impact Score"]).copy().reset_index(drop=True)
+    df = df.sort_values(["Impact Score", "Effort Score", "Step"], ascending=[False, True, True]).reset_index(drop=True)
     n = len(df)
     if n == 0:
         return df
 
-    cols = max(1, math.ceil(math.sqrt(n)))
-    rows = max(1, math.ceil(n / cols))
+    cols = math.ceil(math.sqrt(n))
+    rows = math.ceil(n / cols)
 
-    x_pad = min(0.012, (xmax - xmin) * 0.12)
-    y_pad = min(0.012, (ymax - ymin) * 0.12)
-    usable_x0, usable_x1 = xmin + x_pad, xmax - x_pad
-    usable_y0, usable_y1 = ymin + y_pad, ymax - y_pad
+    pad_x = (xmax - xmin) * 0.12
+    pad_y = (ymax - ymin) * 0.12
+    usable_xmin = xmin + pad_x
+    usable_xmax = xmax - pad_x
+    usable_ymin = ymin + pad_y
+    usable_ymax = ymax - pad_y
+
+    if usable_xmax <= usable_xmin:
+        usable_xmin, usable_xmax = xmin, xmax
+    if usable_ymax <= usable_ymin:
+        usable_ymin, usable_ymax = ymin, ymax
 
     xs, ys = [], []
     for i in range(n):
         r = i // cols
         c = i % cols
-        x = usable_x0 + (c + 0.5) * max((usable_x1 - usable_x0) / cols, 1e-6)
-        y = usable_y1 - (r + 0.5) * max((usable_y1 - usable_y0) / rows, 1e-6)
+        x = usable_xmin + (c + 0.5) * (usable_xmax - usable_xmin) / cols
+        y = usable_ymax - (r + 0.5) * (usable_ymax - usable_ymin) / rows
         xs.append(x)
         ys.append(y)
 
     df["x"] = xs
     df["y"] = ys
+    df["Cell Width"] = xmax - xmin
+    df["Cell Height"] = ymax - ymin
     return df
 
 
-def density_fill(count, max_count):
-    intensity = count / max(max_count, 1)
-    alpha = 0.08 + 0.28 * intensity
-    return f"rgba(70, 130, 180, {alpha:.3f})"
+def leaf_quadrant_name(x_center, y_center):
+    if y_center > 0.5 and x_center <= 0.5:
+        return "Quick Wins"
+    if y_center > 0.5 and x_center > 0.5:
+        return "Major Projects"
+    if y_center <= 0.5 and x_center <= 0.5:
+        return "Fill-Ins"
+    return "Time Sinks"
 
 
-# -------------------------
-# Chart builder
-# -------------------------
-def make_quadtree_matrix(df, selected_step=None, max_depth=3, min_points=6):
+def get_marker_size(plot_df):
+    if plot_df.empty:
+        return 24
+    min_span = min(plot_df["Cell Width"].min(), plot_df["Cell Height"].min())
+    if min_span <= 0.04:
+        return 16
+    if min_span <= 0.08:
+        return 20
+    if min_span <= 0.14:
+        return 24
+    return 28
+
+
+def draw_recursive_cells(fig, leaves):
+    for _, xmin, xmax, ymin, ymax, depth in leaves:
+        opacity = min(0.05 + depth * 0.02, 0.16)
+        fill = f"rgba(68, 95, 127, {opacity:.3f})"
+        fig.add_shape(
+            type="rect",
+            x0=xmin,
+            x1=xmax,
+            y0=ymin,
+            y1=ymax,
+            line=dict(color=CELL_LINE, width=1),
+            fillcolor=fill,
+            layer="below",
+        )
+
+
+def build_recursive_plot_df(df):
+    max_depth = choose_depth(len(df))
+    leaves = recursive_quadtree(df, 0.0, 1.0, 0.0, 1.0, depth=0, max_depth=max_depth)
+
+    parts = []
+    for leaf_df, xmin, xmax, ymin, ymax, depth in leaves:
+        temp = assign_positions_in_cell(leaf_df.copy(), xmin, xmax, ymin, ymax)
+        temp["Leaf Depth"] = depth
+        temp["Leaf Quadrant"] = leaf_quadrant_name((xmin + xmax) / 2.0, (ymin + ymax) / 2.0)
+        parts.append(temp)
+
+    plot_df = pd.concat(parts, ignore_index=True) if parts else df.copy()
+    return plot_df, leaves
+
+
+def make_impact_effort_matrix(df, selected_step=None):
     df = df.copy()
     df[["Therblig / Motion Type", "Motion Class"]] = df.apply(
         lambda row: pd.Series(classify_therblig(row["Description"], row["Activity"], row["Activity Type"])),
@@ -413,57 +484,16 @@ def make_quadtree_matrix(df, selected_step=None, max_depth=3, min_points=6):
     df["Impact"] = df.apply(classify_impact, axis=1)
     df["Effort"] = df.apply(classify_effort, axis=1)
     df["Quadrant"] = df.apply(get_quadrant, axis=1)
-    df = compute_scores(df)
     df["Lean / Six Sigma Logic"] = df.apply(build_logic_text, axis=1)
-    df = df.sort_values("Step").reset_index(drop=True)
+    df = compute_continuous_scores(df.sort_values("Step").reset_index(drop=True))
 
-    cells = quadtree_partition(df, 0.0, 1.0, 0.0, 1.0, depth=0, max_depth=max_depth, min_points=min_points)
-
-    positioned_frames = []
-    leaf_meta = []
-    max_count = max((len(cell_df) for cell_df, *_ in cells), default=1)
-
-    for cell_df, x0, x1, y0, y1, depth in cells:
-        temp = assign_positions_in_cell(cell_df, x0, x1, y0, y1)
-        temp["Cell X0"] = x0
-        temp["Cell X1"] = x1
-        temp["Cell Y0"] = y0
-        temp["Cell Y1"] = y1
-        temp["Tree Depth"] = depth
-        positioned_frames.append(temp)
-        leaf_meta.append(
-            {
-                "x0": x0,
-                "x1": x1,
-                "y0": y0,
-                "y1": y1,
-                "depth": depth,
-                "count": len(cell_df),
-                "fillcolor": density_fill(len(cell_df), max_count),
-            }
-        )
-
-    plot_df = pd.concat(positioned_frames, ignore_index=True) if positioned_frames else df.copy()
-
-    quadrant_outline_colors = {
-        "Quick Wins": "#2a9d8f",
-        "Major Projects": "#7b61ff",
-        "Fill-Ins": "#3a86ff",
-        "Time Sinks": "#ef476f",
-    }
+    plot_df, leaves = build_recursive_plot_df(df)
+    marker_size = get_marker_size(plot_df)
 
     fig = go.Figure()
+    draw_recursive_cells(fig, leaves)
 
-    for meta in leaf_meta:
-        fig.add_shape(
-            type="rect",
-            x0=meta["x0"], x1=meta["x1"], y0=meta["y0"], y1=meta["y1"],
-            line=dict(color="rgba(70,70,70,0.45)", width=1),
-            fillcolor=meta["fillcolor"],
-            layer="below",
-        )
-
-    for quadrant, color in quadrant_outline_colors.items():
+    for quadrant, color in QUADRANT_COLORS.items():
         temp = plot_df[plot_df["Quadrant"] == quadrant].copy().reset_index(drop=True)
         if temp.empty:
             continue
@@ -479,58 +509,66 @@ def make_quadtree_matrix(df, selected_step=None, max_depth=3, min_points=6):
                 mode="markers+text",
                 text=temp["Step"].astype(str),
                 textposition="middle center",
-                textfont=dict(size=10, color="black"),
-                marker=dict(size=28, color="rgba(255,255,255,0.65)", line=dict(color=color, width=2)),
+                textfont=dict(size=max(9, marker_size - 14), color="black"),
+                marker=dict(size=marker_size, color="rgba(255,255,255,0)", line=dict(color=color, width=2)),
                 customdata=temp[[
-                    "Step", "Description", "Activity", "Impact", "Effort", "Impact Score", "Effort Score",
-                    "Quadrant", "Tree Depth", "Cell X0", "Cell X1", "Cell Y0", "Cell Y1"
+                    "Step",
+                    "Description",
+                    "Activity",
+                    "Therblig / Motion Type",
+                    "Motion Class",
+                    "Impact Score",
+                    "Effort Score",
+                    "Leaf Depth",
                 ]].values,
                 hovertemplate=(
                     "Step: %{customdata[0]}"
                     "<br>Description: %{customdata[1]}"
                     "<br>Activity: %{customdata[2]}"
-                    "<br>Impact: %{customdata[3]} (%{customdata[5]:.2f})"
-                    "<br>Effort: %{customdata[4]} (%{customdata[6]:.2f})"
-                    "<br>Quadrant: %{customdata[7]}"
-                    "<br>Tree depth: %{customdata[8]}"
+                    "<br>Therblig: %{customdata[3]}"
+                    "<br>Motion Class: %{customdata[4]}"
+                    "<br>Impact Score: %{customdata[5]:.3f}"
+                    "<br>Effort Score: %{customdata[6]:.3f}"
+                    "<br>Recursive Level: %{customdata[7]}"
                     "<extra></extra>"
                 ),
                 hoverlabel=dict(bgcolor="white", bordercolor="black", font=dict(color="black", size=12)),
                 selectedpoints=selected_points,
-                selected=dict(marker=dict(size=34, color="rgba(255,255,0,0.95)", opacity=1.0)),
-                unselected=dict(marker=dict(opacity=0.65)),
+                selected=dict(marker=dict(size=marker_size + 6, color="black", opacity=1.0)),
+                unselected=dict(marker=dict(opacity=0.60)),
                 showlegend=False,
             )
         )
 
-    # Main 2x2 split lines
     fig.add_shape(type="line", x0=0.5, x1=0.5, y0=0.0, y1=1.0, line=dict(color="gray", dash="dash", width=1.5))
     fig.add_shape(type="line", x0=0.0, x1=1.0, y0=0.5, y1=0.5, line=dict(color="gray", dash="dash", width=1.5))
 
+    annotations = [
+        dict(x=0.50, y=1.06, xref="paper", yref="paper", text="Recursive Impact vs Effort Matrix", showarrow=False, font=dict(size=22, color="black")),
+        dict(x=0.50, y=0.01, xref="paper", yref="paper", text="Effort", showarrow=False, font=dict(size=18, color="black")),
+        dict(x=0.01, y=0.50, xref="paper", yref="paper", text="Impact", showarrow=False, textangle=-90, font=dict(size=18, color="black")),
+        dict(x=0.26, y=0.96, xref="paper", yref="paper", text="Quick Wins", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Quick Wins"])),
+        dict(x=0.74, y=0.96, xref="paper", yref="paper", text="Major Projects", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Major Projects"])),
+        dict(x=0.26, y=0.09, xref="paper", yref="paper", text="Fill-Ins", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Fill-Ins"])),
+        dict(x=0.74, y=0.09, xref="paper", yref="paper", text="Time Sinks", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Time Sinks"])),
+        dict(x=0.05, y=0.24, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=13, color="black")),
+        dict(x=0.05, y=0.76, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=13, color="black")),
+        dict(x=0.24, y=0.05, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=13, color="black")),
+        dict(x=0.76, y=0.05, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=13, color="black")),
+    ]
+
     fig.update_layout(
-        title=dict(text="Recursive Impact vs Effort Matrix", x=0.5, font=dict(color="black", size=24)),
         xaxis=dict(range=[0, 1], visible=False, fixedrange=True),
-        yaxis=dict(range=[0, 1], visible=False, fixedrange=True),
-        plot_bgcolor="#e6e6e6",
-        paper_bgcolor="#e6e6e6",
-        height=920,
-        margin=dict(l=90, r=40, t=80, b=90),
+        yaxis=dict(range=[0, 1], visible=False, fixedrange=True, scaleanchor="x", scaleratio=1),
+        plot_bgcolor="#dcdcdc",
+        paper_bgcolor="#dcdcdc",
+        height=940,
+        margin=dict(l=70, r=30, t=70, b=60),
         clickmode="event+select",
         dragmode="select",
-        annotations=[
-            dict(x=0.52, y=0.01, xref="paper", yref="paper", text="Effort", showarrow=False, font=dict(size=22, color="black")),
-            dict(x=0.01, y=0.52, xref="paper", yref="paper", text="Impact", showarrow=False, textangle=-90, font=dict(size=22, color="black")),
-            dict(x=0.25, y=0.05, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=16, color="black")),
-            dict(x=0.75, y=0.05, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=16, color="black")),
-            dict(x=0.04, y=0.25, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=16, color="black")),
-            dict(x=0.04, y=0.75, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=16, color="black")),
-            dict(x=0.25, y=0.97, xref="paper", yref="paper", text="Quick Wins", showarrow=False, font=dict(size=15, color="#2a9d8f")),
-            dict(x=0.75, y=0.97, xref="paper", yref="paper", text="Major Projects", showarrow=False, font=dict(size=15, color="#7b61ff")),
-            dict(x=0.25, y=0.12, xref="paper", yref="paper", text="Fill-Ins", showarrow=False, font=dict(size=15, color="#3a86ff")),
-            dict(x=0.75, y=0.12, xref="paper", yref="paper", text="Time Sinks", showarrow=False, font=dict(size=15, color="#ef476f")),
-        ],
+        annotations=annotations,
     )
-    return fig, plot_df, leaf_meta
+    return fig, plot_df
 
 
 def style_logic_table(df, selected_step=None):
@@ -560,13 +598,14 @@ def get_selected_step_from_event(event):
 
 st.markdown(
     """
-**How this version works**
+**Classification logic used in this chart**
 
-- The page still classifies each row using **Description + Activity + Activity Type + Duration (Sec) + Resources**.
-- Then it converts each activity into a continuous **Impact Score** and **Effort Score** between 0 and 1.
-- The matrix is recursively split into **4 sub-quadrants**, and each occupied region is split again up to the selected tree depth.
-- Darker cells indicate **higher local density**, so the chart behaves like a **quadtree + heatmap**.
-- This helps separate crowded activities inside the same main quadrant instead of stacking them in one flat block.
+- It uses **Description + Activity + Activity Type + Duration (Sec) + Resources** together.
+- **Impact** is driven mainly by whether the motion is an **effective therblig** or an **ineffective/non-value-added therblig**.
+- **Effort** is scored separately using duration, motion waste, repeated walking/searching/inspection, and resource involvement.
+- Each activity is converted into a continuous **Impact Score** and **Effort Score** between 0 and 1.
+- The full matrix is then recursively divided into **Quick Wins, Major Projects, Fill-Ins, and Time Sinks**, and each resulting quadrant is divided again using the same logic.
+- The chart therefore stays faithful to the original 2×2 impact–effort idea, but it places activities more precisely inside nested sub-quadrants.
 """
 )
 
@@ -577,26 +616,12 @@ try:
     if "impact_effort_selected_step" not in st.session_state:
         st.session_state["impact_effort_selected_step"] = None
 
-    control_col1, control_col2, control_col3 = st.columns([1, 1, 2])
-    with control_col1:
-        max_depth = st.slider("Quadtree depth", min_value=1, max_value=6, value=3, step=1)
-    with control_col2:
-        min_points = st.slider("Min points per cell", min_value=1, max_value=15, value=6, step=1)
-    with control_col3:
-        st.caption(
-            "Higher depth gives finer subdivision. Lower min points forces more splitting. "
-            "Use both controls to tune cluster visibility."
-        )
-
-    initial_fig, _, _ = make_quadtree_matrix(
-        df,
-        selected_step=st.session_state["impact_effort_selected_step"],
-        max_depth=max_depth,
-        min_points=min_points,
+    fig, table_df = make_impact_effort_matrix(
+        df, selected_step=st.session_state["impact_effort_selected_step"]
     )
 
     chart_event = st.plotly_chart(
-        initial_fig,
+        fig,
         use_container_width=True,
         theme=None,
         key="impact_effort_chart",
@@ -608,17 +633,9 @@ try:
     clicked_step = get_selected_step_from_event(chart_event)
     if clicked_step is not None:
         st.session_state["impact_effort_selected_step"] = clicked_step
+        st.rerun()
 
     selected_step = st.session_state.get("impact_effort_selected_step")
-    fig, table_df, leaf_meta = make_quadtree_matrix(
-        df,
-        selected_step=selected_step,
-        max_depth=max_depth,
-        min_points=min_points,
-    )
-
-    if clicked_step is not None:
-        st.rerun()
 
     st.markdown(
         f"""
@@ -629,21 +646,21 @@ try:
         unsafe_allow_html=True,
     )
 
-    summary_col1, summary_col2, summary_col3 = st.columns(3)
-    with summary_col1:
-        st.metric("Activities", len(table_df))
-    with summary_col2:
-        st.metric("Leaf cells", len(leaf_meta))
-    with summary_col3:
-        st.metric("Max tree depth used", max((meta["depth"] for meta in leaf_meta), default=0))
-
     st.markdown("### Activity classification table")
 
     filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 1.2])
     with filter_col1:
-        impact_filter = st.multiselect("Filter Impact", options=["Low", "High"], default=["Low", "High"])
+        impact_filter = st.multiselect(
+            "Filter Impact",
+            options=["Low", "High"],
+            default=["Low", "High"],
+        )
     with filter_col2:
-        effort_filter = st.multiselect("Filter Effort", options=["Low", "High"], default=["Low", "High"])
+        effort_filter = st.multiselect(
+            "Filter Effort",
+            options=["Low", "High"],
+            default=["Low", "High"],
+        )
     with filter_col3:
         if st.button("Clear marker selection", use_container_width=True):
             st.session_state["impact_effort_selected_step"] = None
@@ -657,8 +674,6 @@ try:
 
     display_df = display_df.sort_values(["Step", "Impact", "Effort"]).reset_index(drop=True)
     display_df["Duration"] = display_df["Duration Seconds"].round(0).astype(int).astype(str) + " s"
-    display_df["Impact Score"] = display_df["Impact Score"].round(2)
-    display_df["Effort Score"] = display_df["Effort Score"].round(2)
 
     table_cols = [
         "Step",
@@ -668,10 +683,9 @@ try:
         "Motion Class",
         "Impact",
         "Effort",
+        "Quadrant",
         "Impact Score",
         "Effort Score",
-        "Quadrant",
-        "Tree Depth",
         "Duration",
         "Lean / Six Sigma Logic",
     ]
@@ -679,6 +693,8 @@ try:
         "Therblig / Motion Type": "Therblig",
         "Lean / Six Sigma Logic": "Logic",
     })
+    display_df["Impact Score"] = display_df["Impact Score"].round(3)
+    display_df["Effort Score"] = display_df["Effort Score"].round(3)
 
     styled_table = style_logic_table(display_df, selected_step=selected_step)
     st.dataframe(styled_table, use_container_width=True, hide_index=True)
@@ -687,6 +703,5 @@ try:
         st.caption(f"Selected marker: Step {selected_step}. The matching row is highlighted below.")
     else:
         st.caption("Click a marker once to select it and highlight the matching row in the table.")
-
 except Exception as e:
     st.error(f"Error: {e}")
