@@ -19,8 +19,13 @@ normalized = normalize_steps(steps)
 tasks = generate_macro_tasks(normalized)
 outputs = build_precedence_outputs(tasks)
 
-show_reduced = st.checkbox("Show simplified network", value=True, help="Shows the transitive-reduced DAG so only essential precedence links are drawn.")
+show_reduced = st.checkbox(
+    "Show simplified network",
+    value=True,
+    help="Shows only essential precedence links for readability.",
+)
 graph = outputs["display_graph"] if show_reduced else outputs["graph"]
+
 
 def build_layered_positions(graph: nx.DiGraph):
     if graph.number_of_nodes() == 0:
@@ -38,17 +43,16 @@ def build_layered_positions(graph: nx.DiGraph):
     y_gap = 2.2
     for lv in sorted(grouped):
         nodes = sorted(grouped[lv])
-        n = len(nodes)
-        center = (n - 1) / 2.0
+        center = (len(nodes) - 1) / 2.0
         for i, node in enumerate(nodes):
             pos[node] = (lv * x_gap, (center - i) * y_gap)
     return pos
 
+
 pos = build_layered_positions(graph)
 label_width = 14 if graph.number_of_nodes() <= 18 else 11
 labels = {
-    n: "
-".join(textwrap.wrap(graph.nodes[n]["name"], width=label_width)[:3])
+    n: "\n".join(textwrap.wrap(graph.nodes[n]["name"], width=label_width)[:3])
     for n in graph.nodes()
 }
 cp_nodes = set(outputs["critical_path_task_ids"])
@@ -70,15 +74,16 @@ if cp_edges:
     nx.draw_networkx_edges(graph, pos, edgelist=list(cp_edges), ax=ax, arrows=True, edge_color="#c0392b", width=3.0, arrowsize=20, connectionstyle="arc3,rad=0.02")
 if normal_nodes:
     nx.draw_networkx_nodes(graph, pos, nodelist=normal_nodes, ax=ax, node_size=node_size, node_color="#d6eaf8", edgecolors="#1f4e79", linewidths=1.3)
-if cp_nodes:
-    nx.draw_networkx_nodes(graph, pos, nodelist=list(cp_nodes & set(graph.nodes())), ax=ax, node_size=node_size * 1.04, node_color="#f9d6d5", edgecolors="#922b21", linewidths=1.4)
+critical_visible = list(cp_nodes & set(graph.nodes()))
+if critical_visible:
+    nx.draw_networkx_nodes(graph, pos, nodelist=critical_visible, ax=ax, node_size=node_size * 1.04, node_color="#f9d6d5", edgecolors="#922b21", linewidths=1.4)
 
 nx.draw_networkx_labels(graph, pos, labels=labels, ax=ax, font_size=font_size, font_weight="bold")
 ax.set_axis_off()
 plt.tight_layout()
 
 st.pyplot(fig, use_container_width=True)
-st.caption("Red edges show the critical path. Turn off simplified view if you want to inspect every original precedence link.")
+st.caption("Red edges show the critical path. Turn off simplified view to inspect every original precedence link.")
 
 st.subheader("Discovered tasks")
 st.dataframe(tasks_to_df(tasks), use_container_width=True)
