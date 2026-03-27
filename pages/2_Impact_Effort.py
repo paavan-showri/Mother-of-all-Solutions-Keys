@@ -517,6 +517,62 @@ def get_selected_step_from_event(event):
         return None
 
 
+
+
+def render_step_by_step_explanation():
+    st.markdown("### How this chart was analyzed and plotted")
+    with st.expander("Step-by-step explanation", expanded=True):
+        st.markdown(
+            """
+1. **The page first reads the uploaded current-state workbook.**  
+   It finds the Flow Process Chart header row, loads the activity table, and standardizes columns such as Step, Description, Activity, Activity Type, Duration, and Resources.
+
+2. **Each activity is interpreted using Lean and motion-analysis logic.**  
+   The code reads the Description, Activity code, and Activity Type to classify the step into a therblig or motion type such as **Use, Move, Grasp, Search, Delay, Inspect/Check, Reposition/Relocate,** or **Plan/Decision**.
+
+3. **The activity is then judged as effective or ineffective motion.**  
+   Motions that directly advance the work are treated as **Effective**, while waiting, searching, extra handling, repeated repositioning, inspection, and similar non-value-added behavior are treated as **Ineffective**.
+
+4. **A first-level Impact and Effort class is assigned.**  
+   The page uses Lean logic to decide whether the step has **High or Low Impact** and **High or Low Effort**. This uses the therblig, motion class, activity type, duration, and resource involvement together.
+
+5. **The qualitative logic is converted into continuous numeric scores.**  
+   Every activity is converted into an **Impact Score** and an **Effort Score** between 0 and 1. This means the chart is not using only a simple High/Low bucket; each step is given a continuous position in the impact–effort space.
+
+6. **Each activity becomes a point in a 2D impact–effort plane.**  
+   Mathematically, activity *i* is represented as **pᵢ = (eᵢ, mᵢ)**, where **eᵢ** is the Effort Score and **mᵢ** is the Impact Score.
+
+7. **The first split creates the main four quadrants.**  
+   The full matrix is divided into:
+   - **Quick Wins** = high impact, low effort  
+   - **Major Projects** = high impact, high effort  
+   - **Fill-Ins** = low impact, low effort  
+   - **Time Sinks** = low impact, high effort
+
+8. **Each populated quadrant is then re-evaluated locally.**  
+   Instead of stopping at the first 2×2 split, the code takes only the activities inside a quadrant and recalculates local split values using the **median Effort Score** and **median Impact Score** of that quadrant.
+
+9. **The activities inside that quadrant are split again into four local quadrants.**  
+   So, for example, activities inside top-level **Major Projects** are split again into local **Quick Wins, Major Projects, Fill-Ins,** and **Time Sinks** relative to that parent quadrant.
+
+10. **This recursive splitting continues only when it is meaningful.**  
+    A quadrant is subdivided again only when it contains multiple activities and the split actually separates them. If a quadrant has only one process, it is left unsplit for clarity.
+
+11. **The geometric structure follows quadtree logic.**  
+    Every meaningful split divides one region into four child regions. Because of that, the spatial structure follows a geometric progression: level 0 has 1 region, level 1 has 4, level 2 has 16, level 3 has 64, and so on.
+
+12. **The final activities are neatly arranged inside their leaf quadrants.**  
+    After the recursive partition is complete, the activities in each final leaf cell are placed in a small internal grid so the quadrant borders remain visible and the points do not overlap unnecessarily.
+
+13. **The tooltip and table show the interpretation result.**  
+    Hovering shows the key identifiers for the plotted point, while the table below shows the final therblig, motion class, impact, effort, scores, and Lean logic used to classify the step.
+
+14. **So the final chart is more than a normal impact–effort matrix.**  
+    It is a **quadtree-style recursive local 2D partitioning model** built from **Lean logic**, **continuous impact–effort coordinates**, and **median-based recursive splitting**.
+            """
+        )
+
+
 st.markdown(
     """
 **Classification logic used in this chart**
@@ -554,6 +610,8 @@ try:
         st.rerun()
 
     selected_step = st.session_state.get("impact_effort_selected_step")
+
+    render_step_by_step_explanation()
 
     st.markdown(
         f"""

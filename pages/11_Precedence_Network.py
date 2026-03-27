@@ -1,4 +1,3 @@
-import math
 import textwrap
 
 import networkx as nx
@@ -16,29 +15,61 @@ st.set_page_config(page_title="Precedence Network", layout="wide")
 st.title("Precedence Network")
 ctx = require_workbook()
 
-left, right = st.columns([1, 1])
-with left:
-    show_simplified = st.checkbox("Show simplified graph", value=True)
-    wrap_chain = st.checkbox("Wrap long chain into rows", value=True)
-with right:
-    show_task_ids = st.checkbox("Show task IDs in labels", value=False)
-    show_edge_labels = st.checkbox("Show arrows", value=True)
+# Make Plotly toolbar larger and always visible.
+st.markdown(
+    """
+    <style>
+    div[data-testid="stPlotlyChart"] .modebar {
+        transform: scale(1.45);
+        transform-origin: top right;
+        opacity: 1 !important;
+        right: 18px !important;
+        top: 12px !important;
+    }
+    div[data-testid="stPlotlyChart"] .modebar-group {
+        background: rgba(255,255,255,0.96) !important;
+        border: 1px solid #cfcfcf !important;
+        border-radius: 10px !important;
+        padding: 3px 5px !important;
+        margin-left: 6px !important;
+        box-shadow: 0 1px 6px rgba(0,0,0,0.12) !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-controls = st.columns(6)
+top1, top2, top3 = st.columns([1, 1, 1])
+with top1:
+    show_simplified = st.checkbox("Show simplified graph", value=True)
+with top2:
+    show_task_ids = st.checkbox("Show task IDs in labels", value=False)
+with top3:
+    curved_edges = st.checkbox("Use curved edges", value=False)
+
+controls = st.columns(7)
 with controls[0]:
     chart_height = st.slider("Chart height", min_value=650, max_value=1800, value=1000, step=50)
 with controls[1]:
-    max_columns = st.slider("Max columns per row", min_value=8, max_value=30, value=14, step=1)
+    chart_width = st.slider("Chart width", min_value=1200, max_value=4200, value=2200, step=100)
 with controls[2]:
-    x_gap = st.slider("Horizontal spacing", min_value=1.5, max_value=6.0, value=2.7, step=0.1)
+    node_size = st.slider("Node size", min_value=34, max_value=95, value=58, step=1)
 with controls[3]:
-    row_gap = st.slider("Row spacing", min_value=3.0, max_value=12.0, value=6.5, step=0.5)
+    text_size = st.slider("Text size", min_value=10, max_value=24, value=14, step=1)
 with controls[4]:
-    node_size = st.slider("Node size", min_value=34, max_value=90, value=58, step=1)
+    x_gap = st.slider("Horizontal spacing", min_value=1.8, max_value=7.0, value=3.0, step=0.1)
 with controls[5]:
-    text_size = st.slider("Text size", min_value=10, max_value=22, value=14, step=1)
+    y_gap = st.slider("Vertical spacing", min_value=1.0, max_value=5.0, value=1.8, step=0.1)
+with controls[6]:
+    label_width = st.slider("Label wrap width", min_value=10, max_value=28, value=16, step=1)
 
-label_width = st.slider("Label wrap width", min_value=10, max_value=26, value=16, step=1)
+download_cols = st.columns(3)
+with download_cols[0]:
+    download_scale = st.slider("Download scale", min_value=1, max_value=5, value=2, step=1)
+with download_cols[1]:
+    download_name = st.text_input("Download filename", value="precedence_network")
+with download_cols[2]:
+    toolbar_hint = st.caption("Use the toolbar at top-right to pan, zoom, reset, and download.")
 
 steps = load_current_state_steps(ctx["excel_file"], sheet_name=ctx["sheet_name"])
 normalized = normalize_steps(steps)
@@ -48,7 +79,7 @@ outputs = build_precedence_outputs(tasks)
 full_graph = outputs["graph"]
 
 
-def copy_attrs(source: nx.DiGraph, target: nx.DiGraph) -> nx.DiGraph:
+def _copy_attrs(source: nx.DiGraph, target: nx.DiGraph) -> nx.DiGraph:
     for n, attrs in source.nodes(data=True):
         if n in target.nodes:
             target.nodes[n].update(attrs)
@@ -58,14 +89,14 @@ def copy_attrs(source: nx.DiGraph, target: nx.DiGraph) -> nx.DiGraph:
 if show_simplified:
     try:
         graph = nx.transitive_reduction(full_graph)
-        graph = copy_attrs(full_graph, graph)
+        graph = _copy_attrs(full_graph, graph)
     except Exception:
         graph = full_graph.copy()
 else:
     graph = full_graph.copy()
 
 
-def build_wrapped_level_positions(g: nx.DiGraph, columns_per_row: int, x_step: float, y_step: float):
+def build_left_to_right_positions(g: nx.DiGraph, x_step: float, y_step: float):
     level = {n: 0 for n in g.nodes()}
     for n in nx.topological_sort(g):
         preds = list(g.predecessors(n))
@@ -77,19 +108,14 @@ def build_wrapped_level_positions(g: nx.DiGraph, columns_per_row: int, x_step: f
         grouped.setdefault(lv, []).append(node)
 
     pos = {}
-    meta = {}
-
     for lv in sorted(grouped):
-        row_block = lv // columns_per_row if wrap_chain else 0
-        col = lv % columns_per_row if wrap_chain else lv
         nodes = sorted(grouped[lv])
         center = (len(nodes) - 1) / 2.0
         for idx, node in enumerate(nodes):
-            x = col * x_step
-            y = -(row_block * y_step) + (center - idx) * 1.2
+            x = lv * x_step
+            y = (center - idx) * y_step
             pos[node] = (x, y)
-            meta[node] = {"level": lv, "row_block": row_block, "col": col}
-    return pos, meta
+    return pos, level
 
 
 def short_label(g: nx.DiGraph, node_id: int, width: int) -> str:
@@ -121,7 +147,7 @@ def hover_label(g: nx.DiGraph, node_id: int) -> str:
     )
 
 
-pos, meta = build_wrapped_level_positions(graph, max_columns, x_gap, row_gap)
+pos, level = build_left_to_right_positions(graph, x_gap, y_gap)
 critical_ids = outputs.get("critical_path_task_ids", [])
 critical_nodes = set(critical_ids)
 critical_edges = set(zip(critical_ids[:-1], critical_ids[1:]))
@@ -132,11 +158,11 @@ edge_x_critical, edge_y_critical = [], []
 for u, v in graph.edges():
     x0, y0 = pos[u]
     x1, y1 = pos[v]
-    if meta[u]["row_block"] != meta[v]["row_block"]:
-        mid_x = x0
-        mid_y = y1 + (row_gap * 0.40)
+
+    if curved_edges and level[u] != level[v]:
+        mid_x = (x0 + x1) / 2.0
         xs = [x0, mid_x, x1, None]
-        ys = [y0, mid_y, y1, None]
+        ys = [y0, y0, y1, None]
     else:
         xs = [x0, x1, None]
         ys = [y0, y1, None]
@@ -148,11 +174,13 @@ for u, v in graph.edges():
         edge_x_normal.extend(xs)
         edge_y_normal.extend(ys)
 
+line_shape = "spline" if curved_edges else "linear"
+
 edge_trace_normal = go.Scatter(
     x=edge_x_normal,
     y=edge_y_normal,
     mode="lines",
-    line=dict(width=1.5, color="#A0A7AE"),
+    line=dict(width=1.5, color="#A0A7AE", shape=line_shape),
     hoverinfo="skip",
     showlegend=False,
 )
@@ -161,7 +189,7 @@ edge_trace_critical = go.Scatter(
     x=edge_x_critical,
     y=edge_y_critical,
     mode="lines",
-    line=dict(width=3.0, color="#C0392B"),
+    line=dict(width=3.0, color="#C0392B", shape=line_shape),
     hoverinfo="skip",
     showlegend=False,
 )
@@ -193,11 +221,7 @@ node_trace_normal = go.Scatter(
     textfont=dict(size=text_size, color="#111111"),
     hovertext=hover_normal,
     hovertemplate="%{hovertext}<extra></extra>",
-    marker=dict(
-        size=node_size,
-        color="#D6EAF8",
-        line=dict(width=2, color="#1F4E79"),
-    ),
+    marker=dict(size=node_size, color="#D6EAF8", line=dict(width=2, color="#1F4E79")),
     showlegend=False,
 )
 
@@ -210,18 +234,14 @@ node_trace_critical = go.Scatter(
     textfont=dict(size=text_size, color="#111111"),
     hovertext=hover_critical,
     hovertemplate="%{hovertext}<extra></extra>",
-    marker=dict(
-        size=node_size + 6,
-        color="#F9D6D5",
-        line=dict(width=2.2, color="#922B21"),
-    ),
+    marker=dict(size=node_size + 6, color="#F9D6D5", line=dict(width=2.2, color="#922B21")),
     showlegend=False,
 )
 
 xs = [p[0] for p in pos.values()] if pos else [0]
 ys = [p[1] for p in pos.values()] if pos else [0]
-x_pad = max(0.6, (max(xs) - min(xs)) * 0.03) if len(xs) > 1 else 1
-y_pad = max(1.0, (max(ys) - min(ys)) * 0.08) if len(ys) > 1 else 1
+x_pad = max(0.7, (max(xs) - min(xs)) * 0.04) if len(xs) > 1 else 1
+y_pad = max(1.0, (max(ys) - min(ys)) * 0.20) if len(ys) > 1 else 1
 
 fig = go.Figure(data=[edge_trace_normal, edge_trace_critical, node_trace_normal, node_trace_critical])
 
@@ -245,16 +265,21 @@ fig.update_layout(
     ),
 )
 
-if show_edge_labels:
-    fig.update_traces(selector=dict(mode="lines"), line_shape="linear")
-
 st.plotly_chart(
     fig,
     width="stretch",
     config={
         "scrollZoom": True,
+        "displayModeBar": True,
         "displaylogo": False,
-        "modeBarButtonsToAdd": ["zoom2d", "pan2d", "resetScale2d"],
+        "modeBarButtonsToAdd": ["zoom2d", "pan2d", "resetScale2d", "toImage"],
+        "toImageButtonOptions": {
+            "format": "png",
+            "filename": download_name,
+            "width": chart_width,
+            "height": chart_height,
+            "scale": download_scale,
+        },
     },
 )
 
