@@ -15,7 +15,6 @@ st.set_page_config(page_title="Precedence Network", layout="wide")
 st.title("Precedence Network")
 ctx = require_workbook()
 
-# Make Plotly toolbar larger and always visible.
 st.markdown(
     """
     <style>
@@ -47,7 +46,7 @@ with top2:
 with top3:
     curved_edges = st.checkbox("Use curved edges", value=False)
 
-controls = st.columns(7)
+controls = st.columns(8)
 with controls[0]:
     chart_height = st.slider("Chart height", min_value=650, max_value=1800, value=1000, step=50)
 with controls[1]:
@@ -59,8 +58,10 @@ with controls[3]:
 with controls[4]:
     x_gap = st.slider("Horizontal spacing", min_value=1.8, max_value=7.0, value=3.0, step=0.1)
 with controls[5]:
-    y_gap = st.slider("Vertical spacing", min_value=1.0, max_value=5.0, value=1.8, step=0.1)
+    y_gap = st.slider("Base vertical spacing", min_value=1.5, max_value=8.0, value=3.2, step=0.1)
 with controls[6]:
+    lane_spread = st.slider("Lane spread multiplier", min_value=1.0, max_value=3.0, value=1.6, step=0.1)
+with controls[7]:
     label_width = st.slider("Label wrap width", min_value=10, max_value=28, value=16, step=1)
 
 download_cols = st.columns(3)
@@ -69,7 +70,7 @@ with download_cols[0]:
 with download_cols[1]:
     download_name = st.text_input("Download filename", value="precedence_network")
 with download_cols[2]:
-    toolbar_hint = st.caption("Use the toolbar at top-right to pan, zoom, reset, and download.")
+    st.caption("Use the toolbar at top-right to pan, zoom, reset, and download.")
 
 steps = load_current_state_steps(ctx["excel_file"], sheet_name=ctx["sheet_name"])
 normalized = normalize_steps(steps)
@@ -96,7 +97,7 @@ else:
     graph = full_graph.copy()
 
 
-def build_left_to_right_positions(g: nx.DiGraph, x_step: float, y_step: float):
+def build_left_to_right_positions(g: nx.DiGraph, x_step: float, y_step: float, spread_mult: float):
     level = {n: 0 for n in g.nodes()}
     for n in nx.topological_sort(g):
         preds = list(g.predecessors(n))
@@ -107,15 +108,19 @@ def build_left_to_right_positions(g: nx.DiGraph, x_step: float, y_step: float):
     for node, lv in level.items():
         grouped.setdefault(lv, []).append(node)
 
+    max_group = max((len(nodes) for nodes in grouped.values()), default=1)
+    auto_y = y_step * spread_mult
+
     pos = {}
     for lv in sorted(grouped):
         nodes = sorted(grouped[lv])
         center = (len(nodes) - 1) / 2.0
+        local_y = auto_y * (1.0 + 0.18 * max(0, len(nodes) - 2))
         for idx, node in enumerate(nodes):
             x = lv * x_step
-            y = (center - idx) * y_step
+            y = (center - idx) * local_y
             pos[node] = (x, y)
-    return pos, level
+    return pos, level, max_group
 
 
 def short_label(g: nx.DiGraph, node_id: int, width: int) -> str:
@@ -147,7 +152,7 @@ def hover_label(g: nx.DiGraph, node_id: int) -> str:
     )
 
 
-pos, level = build_left_to_right_positions(graph, x_gap, y_gap)
+pos, level, max_group = build_left_to_right_positions(graph, x_gap, y_gap, lane_spread)
 critical_ids = outputs.get("critical_path_task_ids", [])
 critical_nodes = set(critical_ids)
 critical_edges = set(zip(critical_ids[:-1], critical_ids[1:]))
@@ -241,7 +246,7 @@ node_trace_critical = go.Scatter(
 xs = [p[0] for p in pos.values()] if pos else [0]
 ys = [p[1] for p in pos.values()] if pos else [0]
 x_pad = max(0.7, (max(xs) - min(xs)) * 0.04) if len(xs) > 1 else 1
-y_pad = max(1.0, (max(ys) - min(ys)) * 0.20) if len(ys) > 1 else 1
+y_pad = max(1.8, (max(ys) - min(ys)) * 0.18) if len(ys) > 1 else 2.5
 
 fig = go.Figure(data=[edge_trace_normal, edge_trace_critical, node_trace_normal, node_trace_critical])
 
@@ -283,10 +288,11 @@ st.plotly_chart(
     },
 )
 
-summary_cols = st.columns(3)
+summary_cols = st.columns(4)
 summary_cols[0].metric("Tasks shown", len(graph.nodes()))
 summary_cols[1].metric("Precedence links shown", len(graph.edges()))
 summary_cols[2].metric("Critical path tasks", len(critical_nodes))
+summary_cols[3].metric("Max tasks in a layer", max_group)
 
 with st.expander("Technological precedence table", expanded=False):
     st.dataframe(outputs["technological_precedence"], width="stretch")
