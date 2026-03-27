@@ -1,7 +1,7 @@
 import io
 import math
 import re
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -11,10 +11,9 @@ st.set_page_config(page_title="Impact vs Effort", layout="wide")
 st.title("Zoomable Impact vs Effort Quadtree")
 
 BOTTOM_NOTE = (
-    "This view keeps the original Lean impact-effort logic, but instead of showing every recursive "
-    "level at once, it shows one quadtree level at a time. Click a quadrant label to expand that "
-    "subdivision, or click an activity marker to highlight the matching row. This avoids the heavy "
-    "clustering that happens when all nested levels are drawn together."
+    "This page shows one recursive quadtree level at a time. Dense quadrants are summarized with a count "
+    "bubble so the structure stays readable; click a quadrant bubble to zoom into that node. Sparse quadrants "
+    "show individual activities inside their local subdivision."
 )
 
 QUADRANT_COLORS = {
@@ -23,31 +22,20 @@ QUADRANT_COLORS = {
     "Fill-Ins": "#2f78ff",
     "Time Sinks": "#ff4d6d",
 }
-
 QUADRANT_ORDER = ["Quick Wins", "Major Projects", "Fill-Ins", "Time Sinks"]
-QUADRANT_SHORT = {
-    "Quick Wins": "QW",
-    "Major Projects": "MP",
-    "Fill-Ins": "FI",
-    "Time Sinks": "TS",
-}
-
 PLOT_BG = "#dcdcdc"
 CELL_LINE = "rgba(65, 105, 155, 0.85)"
-CELL_FILL = "rgba(68, 95, 127, 0.06)"
 CHILD_FILL = {
-    "Quick Wins": "rgba(15, 157, 154, 0.06)",
-    "Major Projects": "rgba(99, 91, 255, 0.06)",
-    "Fill-Ins": "rgba(47, 120, 255, 0.06)",
-    "Time Sinks": "rgba(255, 77, 109, 0.06)",
+    "Quick Wins": "rgba(15, 157, 154, 0.05)",
+    "Major Projects": "rgba(99, 91, 255, 0.05)",
+    "Fill-Ins": "rgba(47, 120, 255, 0.05)",
+    "Time Sinks": "rgba(255, 77, 109, 0.05)",
 }
-MAX_DEPTH = 5
-SHOW_POINTS_THRESHOLD = 16
+MAX_DEPTH = 6
+POINT_DISPLAY_LIMIT = 10
+COUNT_BUBBLE_SIZE = 44
 
 
-# -------------------------
-# Workbook loading helpers
-# -------------------------
 def require_upload():
     if "excel_file_bytes" not in st.session_state or "sheet_name" not in st.session_state:
         st.warning("Please upload the Excel file first on the Home page.")
@@ -58,8 +46,7 @@ def require_upload():
 def normalize_text(value):
     if pd.isna(value):
         return ""
-    text = str(value).strip().lower()
-    return re.sub(r"\s+", " ", text)
+    return re.sub(r"\s+", " ", str(value).strip().lower())
 
 
 def matches_any(text, patterns):
@@ -112,7 +99,6 @@ def load_full_data(file_bytes, sheet_name):
     header_row = find_header_row(file_bytes, sheet_name)
     df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet_name, header=header_row)
     df.columns = df.columns.astype(str).str.strip()
-
     df = df.dropna(how="all")
     df = df[df["Step"].notna()].copy()
     df["Step"] = pd.to_numeric(df["Step"], errors="coerce")
@@ -143,9 +129,6 @@ def load_full_data(file_bytes, sheet_name):
     return df.reset_index(drop=True)
 
 
-# -------------------------
-# Lean / therblig logic
-# -------------------------
 NON_VALUE_ACTIVITY_TEXT = {
     "T": "Transport is non-value-added unless it directly supports transformation.",
     "M": "Handling or motion is non-value-added when it is walking, repositioning, searching, or extra motion.",
@@ -203,7 +186,6 @@ LOW_IMPACT_THERBLIGS = {
 
 def classify_therblig(desc, activity, activity_type):
     text = normalize_text(desc)
-
     if activity == "W":
         if matches_any(text, [r"\bsearch\b", r"\blook for\b", r"\bfind\b", r"\blocate\b"]):
             return "Search", "Ineffective"
@@ -216,7 +198,6 @@ def classify_therblig(desc, activity, activity_type):
         return "Non-Value Motion", "Ineffective"
     if activity == "S":
         return "Position", "Ineffective"
-
     if matches_any(text, [r"\bsearch\b", r"\blook for\b", r"\blocate\b", r"\bfind\b"]):
         return "Search", "Ineffective"
     if matches_any(text, [r"\bwait\b", r"\bdelay\b", r"\bidle\b"]):
@@ -225,16 +206,12 @@ def classify_therblig(desc, activity, activity_type):
         return "Walk/Transport Empty", "Ineffective"
     if matches_any(text, [r"\bturn around\b", r"\bturn back\b", r"\breorient\b"]):
         return "Reorient/Extra Motion", "Ineffective"
-    if matches_any(text, [
-        r"\breposition\b", r"\bmove .* back\b", r"\bmove knife to new location\b", r"\bmove plate\b",
-        r"\bmove butter plate\b", r"\bmove fruit bowl\b", r"\bmove plate with toast\b"
-    ]):
+    if matches_any(text, [r"\breposition\b", r"\bmove .* back\b", r"\bmove knife to new location\b", r"\bmove plate\b", r"\bmove butter plate\b", r"\bmove fruit bowl\b", r"\bmove plate with toast\b"]):
         return "Reposition/Relocate", "Ineffective"
     if matches_any(text, [r"\bposition\b", r"\badjust\b", r"\balign\b", r"\borient\b"]):
         return "Position", "Ineffective"
     if matches_any(text, [r"\bhold\b", r"\bsteady\b"]):
         return "Hold", "Ineffective"
-
     if matches_any(text, [r"\bgrasp\b", r"\bpick\b", r"\bgrab\b", r"\btake\b"]):
         return "Grasp", "Effective"
     if matches_any(text, [r"\bdrop\b", r"\bplace\b", r"\bput\b", r"\bset down\b", r"\brelease\b"]):
@@ -242,20 +219,15 @@ def classify_therblig(desc, activity, activity_type):
     if matches_any(text, [r"\bopen\b", r"\bclose\b", r"\bturn on\b", r"\bserve\b", r"\bflip\b"]):
         return "Use", "Effective"
     if matches_any(text, [r"\bcut\b", r"\bslice\b"]):
-        if matches_any(text, [r"\bstack\b"]):
-            return "Assemble", "Effective"
-        return "Use / Disassemble", "Effective"
+        return "Assemble", "Effective" if matches_any(text, [r"\bstack\b"]) else ("Use / Disassemble", "Effective")
     if matches_any(text, [r"\bstack\b", r"\bassemble\b", r"\bcombine\b", r"\bjoin\b"]):
         return "Assemble", "Effective"
     if matches_any(text, [r"\bmove\b", r"\bcarry\b", r"\bbring\b", r"\btransfer\b"]):
         return "Move", "Effective"
-
     if activity == "O":
         return "Use", "Effective"
     if activity in {"T", "M"}:
-        if activity_type == "NVA":
-            return "Reposition/Relocate", "Ineffective"
-        return "Move", "Effective"
+        return ("Reposition/Relocate", "Ineffective") if activity_type == "NVA" else ("Move", "Effective")
     return "Unclassified", "Ineffective"
 
 
@@ -274,7 +246,6 @@ def classify_effort(row):
     therblig = row["Therblig / Motion Type"]
     duration = row["Duration Seconds"]
     res_count = row["Resource Count"]
-
     if therblig in {"Search", "Delay", "Walk/Transport Empty"}:
         return "High"
     if therblig in {"Inspect/Check", "Reorient/Extra Motion", "Non-Value Motion"} and duration >= 3:
@@ -302,17 +273,13 @@ def build_logic_text(row):
     reasons = []
     therblig = row["Therblig / Motion Type"]
     duration = int(round(row["Duration Seconds"]))
-
     if row["Motion Class"] == "Effective":
         reasons.append(f"{therblig} directly advances the work.")
     else:
         reasons.append(f"{therblig} is treated as non-value-added motion.")
     if row["Activity"] in NON_VALUE_ACTIVITY_TEXT:
         reasons.append(NON_VALUE_ACTIVITY_TEXT[row["Activity"]])
-    if duration >= 3:
-        reasons.append(f"Duration={duration}s increases effort.")
-    else:
-        reasons.append(f"Duration={duration}s keeps effort lower.")
+    reasons.append(f"Duration={duration}s {'increases' if duration >= 3 else 'keeps'} effort {'higher' if duration >= 3 else 'lower' }.")
     if row["Resource Count"] >= 4:
         reasons.append("Multiple resources increase complexity.")
     elif row["Resource Count"] >= 3:
@@ -324,29 +291,19 @@ def compute_continuous_scores(df):
     df = df.copy()
     max_duration = max(float(df["Duration Seconds"].max()), 1.0)
     max_resources = max(int(df["Resource Count"].max()), 1)
-
     duration_norm = (df["Duration Seconds"] / max_duration).clip(0, 1)
     resource_norm = (df["Resource Count"] / max_resources).clip(0, 1)
-
     impact_base = df["Impact"].map({"High": 0.74, "Low": 0.26}).fillna(0.26)
     effort_base = df["Effort"].map({"High": 0.74, "Low": 0.26}).fillna(0.26)
     impact_adjust = df["Therblig / Motion Type"].map(THERBLIG_IMPACT_ADJUST).fillna(0.0)
     effort_adjust = df["Therblig / Motion Type"].map(THERBLIG_EFFORT_ADJUST).fillna(0.0)
     activity_type_adjust = df["Activity Type"].map({"VA": 0.08, "NNVA": -0.02, "NVA": -0.08}).fillna(0.0)
     motion_adjust = df["Motion Class"].map({"Effective": 0.05, "Ineffective": -0.05}).fillna(0.0)
-
-    df["Impact Score"] = (
-        impact_base + impact_adjust + activity_type_adjust + motion_adjust - 0.04 * duration_norm + 0.02 * resource_norm
-    ).clip(0.02, 0.98)
-    df["Effort Score"] = (
-        effort_base + effort_adjust + 0.18 * duration_norm + 0.10 * resource_norm
-    ).clip(0.02, 0.98)
+    df["Impact Score"] = (impact_base + impact_adjust + activity_type_adjust + motion_adjust - 0.04 * duration_norm + 0.02 * resource_norm).clip(0.02, 0.98)
+    df["Effort Score"] = (effort_base + effort_adjust + 0.18 * duration_norm + 0.10 * resource_norm).clip(0.02, 0.98)
     return df
 
 
-# -------------------------
-# Quadtree helpers
-# -------------------------
 def child_bounds(bounds: Tuple[float, float, float, float], quadrant: str) -> Tuple[float, float, float, float]:
     xmin, xmax, ymin, ymax = bounds
     xmid = (xmin + xmax) / 2.0
@@ -362,15 +319,13 @@ def child_bounds(bounds: Tuple[float, float, float, float], quadrant: str) -> Tu
 
 def path_to_bounds(path: List[str]) -> Tuple[float, float, float, float]:
     bounds = (0.0, 1.0, 0.0, 1.0)
-    for quadrant in path:
-        bounds = child_bounds(bounds, quadrant)
+    for quad in path:
+        bounds = child_bounds(bounds, quad)
     return bounds
 
 
 def path_label(path: List[str]) -> str:
-    if not path:
-        return "Root"
-    return " > ".join(path)
+    return "Root" if not path else " > ".join(path)
 
 
 def score_to_path(effort_score: float, impact_score: float, levels: int) -> List[str]:
@@ -421,15 +376,13 @@ def assign_points_in_bounds(df: pd.DataFrame, bounds: Tuple[float, float, float,
     n = len(temp)
     if n == 0:
         return temp
-
     xmin, xmax, ymin, ymax = bounds
     cols = math.ceil(math.sqrt(n))
     rows = math.ceil(n / cols)
-    pad_x = (xmax - xmin) * 0.14
-    pad_y = (ymax - ymin) * 0.14
+    pad_x = max((xmax - xmin) * 0.10, 0.005)
+    pad_y = max((ymax - ymin) * 0.10, 0.005)
     ux0, ux1 = xmin + pad_x, xmax - pad_x
     uy0, uy1 = ymin + pad_y, ymax - pad_y
-
     xs, ys = [], []
     for i in range(n):
         r = i // cols
@@ -438,56 +391,41 @@ def assign_points_in_bounds(df: pd.DataFrame, bounds: Tuple[float, float, float,
         y = uy1 - (r + 0.5) * (uy1 - uy0) / rows
         xs.append(x)
         ys.append(y)
-
     temp["x"] = xs
     temp["y"] = ys
     return temp
 
 
-def build_focus_plot_df(df: pd.DataFrame, focus_path: List[str]) -> pd.DataFrame:
-    pieces = []
-    for quad in QUADRANT_ORDER:
-        child_df = get_child_df(df, focus_path, quad)
-        if child_df.empty:
-            continue
-        bounds = child_bounds(path_to_bounds(focus_path), quad)
-        placed = assign_points_in_bounds(child_df, bounds)
-        placed["Visible Child"] = quad
-        pieces.append(placed)
-    if not pieces:
-        return pd.DataFrame()
-    return pd.concat(pieces, ignore_index=True)
-
-
 def get_child_summary(df: pd.DataFrame, focus_path: List[str]) -> pd.DataFrame:
+    parent_bounds = path_to_bounds(focus_path)
     rows = []
     for quad in QUADRANT_ORDER:
         child_df = get_child_df(df, focus_path, quad)
-        bounds = child_bounds(path_to_bounds(focus_path), quad)
-        count = len(child_df)
-        if count == 0:
-            avg_impact = None
-            avg_effort = None
-        else:
-            avg_impact = float(child_df["Impact Score"].mean())
-            avg_effort = float(child_df["Effort Score"].mean())
+        bounds = child_bounds(parent_bounds, quad)
         rows.append({
             "Quadrant": quad,
-            "Count": count,
-            "Avg Impact Score": avg_impact,
-            "Avg Effort Score": avg_effort,
+            "Count": len(child_df),
             "bounds": bounds,
             "path": focus_path + [quad],
+            "Avg Impact Score": None if child_df.empty else float(child_df["Impact Score"].mean()),
+            "Avg Effort Score": None if child_df.empty else float(child_df["Effort Score"].mean()),
+            "Show Points": len(child_df) <= POINT_DISPLAY_LIMIT,
         })
     return pd.DataFrame(rows)
 
 
-def marker_size_from_count(count: int) -> int:
-    if count <= 6:
-        return 28
-    if count <= 12:
-        return 24
-    return 20
+def build_focus_plot_df(df: pd.DataFrame, focus_path: List[str], child_summary: pd.DataFrame) -> pd.DataFrame:
+    pieces = []
+    for _, row in child_summary.iterrows():
+        if not row["Show Points"] or row["Count"] == 0:
+            continue
+        child_df = get_child_df(df, focus_path, row["Quadrant"])
+        placed = assign_points_in_bounds(child_df, row["bounds"])
+        placed["Visible Child"] = row["Quadrant"]
+        pieces.append(placed)
+    if not pieces:
+        return pd.DataFrame()
+    return pd.concat(pieces, ignore_index=True)
 
 
 def add_child_rectangles(fig: go.Figure, child_summary: pd.DataFrame):
@@ -500,23 +438,39 @@ def add_child_rectangles(fig: go.Figure, child_summary: pd.DataFrame):
             x1=xmax,
             y0=ymin,
             y1=ymax,
-            line=dict(color=CELL_LINE, width=1.4),
+            line=dict(color=CELL_LINE, width=1.5),
             fillcolor=CHILD_FILL[quad],
             layer="below",
         )
 
 
-def add_cell_click_targets(fig: go.Figure, child_summary: pd.DataFrame):
-    centers_x, centers_y, labels, custom = [], [], [], []
+def add_cell_labels(fig: go.Figure, child_summary: pd.DataFrame):
     for _, row in child_summary.iterrows():
         xmin, xmax, ymin, ymax = row["bounds"]
         quad = row["Quadrant"]
         count = int(row["Count"])
+        fig.add_annotation(
+            x=xmin + 0.02 * (xmax - xmin) + xmin * 0,
+            y=ymax - 0.08 * (ymax - ymin),
+            text=f"{quad}<br>{count}",
+            showarrow=False,
+            xanchor="left",
+            yanchor="top",
+            font=dict(size=14, color=QUADRANT_COLORS[quad]),
+            align="left",
+        )
+
+
+def add_click_targets(fig: go.Figure, child_summary: pd.DataFrame):
+    centers_x, centers_y, labels, custom = [], [], [], []
+    for _, row in child_summary.iterrows():
+        xmin, xmax, ymin, ymax = row["bounds"]
+        count = int(row["Count"])
+        quad = row["Quadrant"]
         centers_x.append((xmin + xmax) / 2.0)
         centers_y.append((ymin + ymax) / 2.0)
-        labels.append(f"{quad}<br>{count}")
+        labels.append(str(count) if count > POINT_DISPLAY_LIMIT else "")
         custom.append(["cell", quad, " > ".join(row["path"]), count])
-
     fig.add_trace(
         go.Scatter(
             x=centers_x,
@@ -525,9 +479,14 @@ def add_cell_click_targets(fig: go.Figure, child_summary: pd.DataFrame):
             text=labels,
             textposition="middle center",
             textfont=dict(size=16, color="black"),
-            marker=dict(size=56, opacity=0.01, color="rgba(0,0,0,0)"),
+            marker=dict(
+                size=[COUNT_BUBBLE_SIZE if int(c[3]) > POINT_DISPLAY_LIMIT else 26 for c in custom],
+                color=[QUADRANT_COLORS[c[1]] if int(c[3]) > POINT_DISPLAY_LIMIT else "rgba(0,0,0,0)" for c in custom],
+                opacity=[0.18 if int(c[3]) > POINT_DISPLAY_LIMIT else 0.01 for c in custom],
+                line=dict(color=[QUADRANT_COLORS[c[1]] for c in custom], width=2),
+            ),
             customdata=custom,
-            hovertemplate="Click to expand %{customdata[1]}<br>Count: %{customdata[3]}<extra></extra>",
+            hovertemplate="Click to zoom into %{customdata[1]}<br>Count: %{customdata[3]}<extra></extra>",
             showlegend=False,
         )
     )
@@ -540,7 +499,6 @@ def add_activity_traces(fig: go.Figure, plot_df: pd.DataFrame, selected_step=Non
         temp = plot_df[plot_df["Visible Child"] == quad].copy().reset_index(drop=True)
         if temp.empty:
             continue
-        marker_size = marker_size_from_count(len(temp))
         selected_points = None
         if selected_step is not None and selected_step in temp["Step"].tolist():
             selected_points = [temp.index[temp["Step"] == selected_step][0]]
@@ -551,8 +509,8 @@ def add_activity_traces(fig: go.Figure, plot_df: pd.DataFrame, selected_step=Non
                 mode="markers+text",
                 text=temp["Step"].astype(str),
                 textposition="middle center",
-                textfont=dict(size=max(8, marker_size - 10), color="black"),
-                marker=dict(size=marker_size, color="rgba(255,255,255,0)", line=dict(color=QUADRANT_COLORS[quad], width=2)),
+                textfont=dict(size=9, color="black"),
+                marker=dict(size=22, color="rgba(255,255,255,0)", line=dict(color=QUADRANT_COLORS[quad], width=2)),
                 customdata=temp[[
                     "Step", "Description", "Activity", "Therblig / Motion Type", "Motion Class",
                     "Impact Score", "Effort Score", "Recursive Path", "Visible Child"
@@ -569,16 +527,16 @@ def add_activity_traces(fig: go.Figure, plot_df: pd.DataFrame, selected_step=Non
                     "<extra></extra>"
                 ),
                 selectedpoints=selected_points,
-                selected=dict(marker=dict(size=marker_size + 6, color="black", opacity=1.0)),
-                unselected=dict(marker=dict(opacity=0.75)),
+                selected=dict(marker=dict(size=28, color="black", opacity=1.0)),
+                unselected=dict(marker=dict(opacity=0.85)),
                 showlegend=False,
             )
         )
 
 
 def add_global_crosshair(fig: go.Figure):
-    fig.add_shape(type="line", x0=0.5, x1=0.5, y0=0.0, y1=1.0, line=dict(color="gray", dash="dash", width=1.5))
-    fig.add_shape(type="line", x0=0.0, x1=1.0, y0=0.5, y1=0.5, line=dict(color="gray", dash="dash", width=1.5))
+    fig.add_shape(type="line", x0=0.5, x1=0.5, y0=0.0, y1=1.0, line=dict(color="gray", dash="dash", width=1.4))
+    fig.add_shape(type="line", x0=0.0, x1=1.0, y0=0.5, y1=0.5, line=dict(color="gray", dash="dash", width=1.4))
 
 
 def make_impact_effort_matrix(df, focus_path: List[str], selected_step=None):
@@ -594,22 +552,19 @@ def make_impact_effort_matrix(df, focus_path: List[str], selected_step=None):
     df = compute_continuous_scores(df.sort_values("Step").reset_index(drop=True))
     df = assign_recursive_paths(df, MAX_DEPTH)
 
-    node_df = get_node_df(df, focus_path)
     child_summary = get_child_summary(df, focus_path)
-    plot_df = build_focus_plot_df(df, focus_path)
+    node_df = get_node_df(df, focus_path)
+    plot_df = build_focus_plot_df(df, focus_path, child_summary)
 
     fig = go.Figure()
     add_child_rectangles(fig, child_summary)
     add_global_crosshair(fig)
-    add_cell_click_targets(fig, child_summary)
+    add_cell_labels(fig, child_summary)
+    add_click_targets(fig, child_summary)
     add_activity_traces(fig, plot_df, selected_step=selected_step)
 
     focus_title = f"Focus: {path_label(focus_path)}"
-    if focus_path:
-        subtitle = f"Showing immediate subdivisions inside {path_label(focus_path)}"
-    else:
-        subtitle = "Showing the first recursive split of the full matrix"
-
+    subtitle = "Click a dense quadrant bubble to expand it. Sparse quadrants already show activity markers."
     annotations = [
         dict(x=0.50, y=1.06, xref="paper", yref="paper", text="Zoomable Impact vs Effort Quadtree", showarrow=False, font=dict(size=22, color="black")),
         dict(x=0.50, y=1.02, xref="paper", yref="paper", text=focus_title, showarrow=False, font=dict(size=15, color="black")),
@@ -630,7 +585,7 @@ def make_impact_effort_matrix(df, focus_path: List[str], selected_step=None):
         height=900,
         margin=dict(l=70, r=30, t=90, b=60),
         clickmode="event+select",
-        dragmode="select",
+        dragmode=False,
         annotations=annotations,
     )
     return fig, df, node_df, child_summary
@@ -638,23 +593,11 @@ def make_impact_effort_matrix(df, focus_path: List[str], selected_step=None):
 
 def build_rcpsp_priority_table(df: pd.DataFrame, focus_path: List[str]) -> pd.DataFrame:
     temp = get_node_df(df, focus_path).copy()
-    temp["Quadrant Weight"] = temp["Quadrant"].map({
-        "Quick Wins": 4,
-        "Major Projects": 3,
-        "Fill-Ins": 2,
-        "Time Sinks": 1,
-    }).fillna(1)
-    temp["RCPSP Priority Score"] = (
-        0.45 * temp["Quadrant Weight"] +
-        0.35 * temp["Impact Score"] -
-        0.20 * temp["Effort Score"]
-    )
+    temp["Quadrant Weight"] = temp["Quadrant"].map({"Quick Wins": 4, "Major Projects": 3, "Fill-Ins": 2, "Time Sinks": 1}).fillna(1)
+    temp["RCPSP Priority Score"] = 0.45 * temp["Quadrant Weight"] + 0.35 * temp["Impact Score"] - 0.20 * temp["Effort Score"]
     temp = temp.sort_values(["RCPSP Priority Score", "Impact Score", "Effort Score", "Step"], ascending=[False, False, True, True]).reset_index(drop=True)
     temp["RCPSP Priority Rank"] = range(1, len(temp) + 1)
-    return temp[[
-        "RCPSP Priority Rank", "Step", "Description", "Quadrant", "Impact", "Effort",
-        "Impact Score", "Effort Score", "RCPSP Priority Score", "Recursive Path"
-    ]]
+    return temp[["RCPSP Priority Rank", "Step", "Description", "Quadrant", "Impact", "Effort", "Impact Score", "Effort Score", "RCPSP Priority Score", "Recursive Path"]]
 
 
 def style_logic_table(df, selected_step=None):
@@ -662,7 +605,6 @@ def style_logic_table(df, selected_step=None):
         if selected_step is not None and int(row["Step"]) == int(selected_step):
             return ["background-color: #fff3b0; font-weight: bold;"] * len(row)
         return [""] * len(row)
-
     return df.style.apply(highlight_row, axis=1)
 
 
@@ -680,11 +622,10 @@ st.markdown(
     """
 **How this zoomable view works**
 
-- The original chart logic still classifies each activity into **Quick Wins, Major Projects, Fill-Ins, and Time Sinks**.
-- Each activity is also converted to a continuous **Impact Score** and **Effort Score** between 0 and 1.
-- The matrix is recursively divided into the same four quadrants again and again.
-- To avoid heavy clustering, this page shows **one recursive level at a time**. Click a quadrant label to expand it.
-- The **RCPSP priority table** below turns the currently focused node into an execution priority list that can feed a scheduling model.
+- The matrix is split into **Quick Wins, Major Projects, Fill-Ins, and Time Sinks** at each level.
+- Dense child quadrants are shown as a **count bubble** so the structure stays readable.
+- Click a count bubble to zoom deeper into that child quadrant.
+- Sparse child quadrants show the actual activity steps directly.
 """
 )
 
@@ -723,7 +664,7 @@ try:
         key="impact_effort_chart",
         on_select="rerun",
         selection_mode="points",
-        config={"scrollZoom": False},
+        config={"scrollZoom": False, "displayModeBar": False},
     )
 
     payload = get_selected_payload_from_event(chart_event)
@@ -738,30 +679,20 @@ try:
             st.session_state["impact_effort_selected_step"] = int(payload[0])
             st.rerun()
 
-    st.markdown(
-        f"""
-<div style="margin-top: 10px; font-size: 14px; color: black; text-align: justify;">
-{BOTTOM_NOTE}
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"<div style='margin-top: 10px; font-size: 14px; color: black; text-align: justify;'>{BOTTOM_NOTE}</div>", unsafe_allow_html=True)
 
     st.markdown("### Visible subdivision summary")
-    summary_df = child_summary[["Quadrant", "Count", "Avg Impact Score", "Avg Effort Score"]].copy()
+    summary_df = child_summary[["Quadrant", "Count", "Avg Impact Score", "Avg Effort Score", "Show Points"]].copy()
     summary_df["Avg Impact Score"] = summary_df["Avg Impact Score"].round(3)
     summary_df["Avg Effort Score"] = summary_df["Avg Effort Score"].round(3)
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
     st.markdown("### RCPSP auto-priority list for the current focus")
     rcpsp_df = build_rcpsp_priority_table(full_df, focus_path)
-    rcpsp_df["Impact Score"] = rcpsp_df["Impact Score"].round(3)
-    rcpsp_df["Effort Score"] = rcpsp_df["Effort Score"].round(3)
-    rcpsp_df["RCPSP Priority Score"] = rcpsp_df["RCPSP Priority Score"].round(3)
+    rcpsp_df[["Impact Score", "Effort Score", "RCPSP Priority Score"]] = rcpsp_df[["Impact Score", "Effort Score", "RCPSP Priority Score"]].round(3)
     st.dataframe(rcpsp_df, use_container_width=True, hide_index=True)
 
     st.markdown("### Activity classification table")
-
     filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 1.2])
     with filter_col1:
         impact_filter = st.multiselect("Filter Impact", options=["Low", "High"], default=["Low", "High"])
@@ -773,31 +704,21 @@ try:
             st.rerun()
 
     display_df = full_df.copy()
-    display_df = display_df[
-        display_df["Impact"].isin(impact_filter) &
-        display_df["Effort"].isin(effort_filter)
-    ].copy()
+    display_df = display_df[display_df["Impact"].isin(impact_filter) & display_df["Effort"].isin(effort_filter)].copy()
     display_df = display_df.sort_values(["Step", "Impact", "Effort"]).reset_index(drop=True)
     display_df["Duration"] = display_df["Duration Seconds"].round(0).astype(int).astype(str) + " s"
-
     table_cols = [
-        "Step", "Description", "Activity", "Therblig / Motion Type", "Motion Class",
-        "Impact", "Effort", "Quadrant", "Impact Score", "Effort Score", "Recursive Path",
-        "Duration", "Lean / Six Sigma Logic",
+        "Step", "Description", "Activity", "Therblig / Motion Type", "Motion Class", "Impact", "Effort",
+        "Quadrant", "Impact Score", "Effort Score", "Recursive Path", "Duration", "Lean / Six Sigma Logic",
     ]
-    display_df = display_df[table_cols].rename(columns={
-        "Therblig / Motion Type": "Therblig",
-        "Lean / Six Sigma Logic": "Logic",
-    })
-    display_df["Impact Score"] = display_df["Impact Score"].round(3)
-    display_df["Effort Score"] = display_df["Effort Score"].round(3)
-
+    display_df = display_df[table_cols].rename(columns={"Therblig / Motion Type": "Therblig", "Lean / Six Sigma Logic": "Logic"})
+    display_df[["Impact Score", "Effort Score"]] = display_df[["Impact Score", "Effort Score"]].round(3)
     styled_table = style_logic_table(display_df, selected_step=st.session_state.get("impact_effort_selected_step"))
     st.dataframe(styled_table, use_container_width=True, hide_index=True)
 
     if st.session_state.get("impact_effort_selected_step") is not None:
         st.caption(f"Selected marker: Step {st.session_state['impact_effort_selected_step']}. The matching row is highlighted below.")
     else:
-        st.caption("Click an activity marker to highlight it, or click a quadrant label/count to zoom into that node.")
+        st.caption("Click a quadrant bubble to zoom deeper, or click an activity marker to highlight its row.")
 except Exception as e:
     st.error(f"Error: {e}")
