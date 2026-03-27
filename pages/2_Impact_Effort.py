@@ -1,7 +1,6 @@
 import io
 import math
 import re
-from collections import defaultdict
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -11,11 +10,11 @@ st.set_page_config(page_title="Impact vs Effort", layout="wide")
 st.title("Recursive Impact vs Effort Matrix")
 
 BOTTOM_NOTE = (
-    "This view keeps the original Lean impact–effort logic, but it lays the activities inside a "
-    "recursive 2×2 structure. The full matrix is first divided into Quick Wins, Major Projects, "
-    "Fill-Ins, and Time Sinks. Then each of those quadrants is divided again using the same "
-    "impact-versus-effort split, and so on. Activities are therefore positioned inside nested "
-    "sub-quadrants instead of being dumped into only one large box."
+    "This view keeps the original Lean impact–effort logic, but it lays activities inside an "
+    "adaptive recursive 2×2 structure. The full matrix is first divided into Quick Wins, Major "
+    "Projects, Fill-Ins, and Time Sinks. Any sub-quadrant that still contains many activities is "
+    "divided again into the same four categories, so dense areas open up visually instead of "
+    "remaining stacked in one box."
 )
 
 QUADRANT_COLORS = {
@@ -25,9 +24,11 @@ QUADRANT_COLORS = {
     "Time Sinks": "#ff4d6d",
 }
 
-CELL_LINE = "rgba(95, 120, 150, 0.72)"
-CELL_FILL = "rgba(68, 95, 127, 0.08)"
+CELL_LINE = "rgba(65, 105, 155, 0.75)"
+CELL_FILL = "rgba(68, 95, 127, 0.05)"
 PLOT_BG = "#dcdcdc"
+AUTO_LEAF_CAPACITY = 8
+MAX_RECURSION_DEPTH = 6
 
 
 # -------------------------
@@ -210,7 +211,10 @@ def classify_therblig(desc, activity, activity_type):
         return "Walk/Transport Empty", "Ineffective"
     if matches_any(text, [r"\bturn around\b", r"\bturn back\b", r"\breorient\b"]):
         return "Reorient/Extra Motion", "Ineffective"
-    if matches_any(text, [r"\breposition\b", r"\bmove .* back\b", r"\bmove knife to new location\b", r"\bmove plate\b", r"\bmove butter plate\b", r"\bmove fruit bowl\b", r"\bmove plate with toast\b"]):
+    if matches_any(text, [
+        r"\breposition\b", r"\bmove .* back\b", r"\bmove knife to new location\b", r"\bmove plate\b",
+        r"\bmove butter plate\b", r"\bmove fruit bowl\b", r"\bmove plate with toast\b"
+    ]):
         return "Reposition/Relocate", "Ineffective"
     if matches_any(text, [r"\bposition\b", r"\badjust\b", r"\balign\b", r"\borient\b"]):
         return "Position", "Ineffective"
@@ -327,88 +331,120 @@ def compute_continuous_scores(df):
 
 
 # -------------------------
-# Recursive layout
+# Adaptive recursive layout
 # -------------------------
-def auto_levels(n_points):
-    if n_points <= 20:
-        return 2
-    if n_points <= 80:
-        return 3
-    return 4
+def quadrant_name_from_center(bounds):
+    xmin, xmax, ymin, ymax = bounds
+    xc = (xmin + xmax) / 2.0
+    yc = (ymin + ymax) / 2.0
+    if xc <= 0.5 and yc > 0.5:
+        return "Quick Wins"
+    if xc > 0.5 and yc > 0.5:
+        return "Major Projects"
+    if xc <= 0.5 and yc <= 0.5:
+        return "Fill-Ins"
+    return "Time Sinks"
 
 
-def build_full_recursive_cells(levels, xmin=0.0, xmax=1.0, ymin=0.0, ymax=1.0, depth=0):
-    cells = [{"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax, "depth": depth}]
-    if depth >= levels:
-        return cells
+def get_quadrant_for_scores(effort_score, impact_score, x_split, y_split):
+    if effort_score <= x_split and impact_score > y_split:
+        return "Quick Wins"
+    if effort_score > x_split and impact_score > y_split:
+        return "Major Projects"
+    if effort_score <= x_split and impact_score <= y_split:
+        return "Fill-Ins"
+    return "Time Sinks"
 
+
+def split_bounds(bounds):
+    xmin, xmax, ymin, ymax = bounds
     xmid = (xmin + xmax) / 2.0
     ymid = (ymin + ymax) / 2.0
-    children = [
-        (xmin, xmid, ymid, ymax),  # Quick Wins
-        (xmid, xmax, ymid, ymax),  # Major Projects
-        (xmin, xmid, ymin, ymid),  # Fill-Ins
-        (xmid, xmax, ymin, ymid),  # Time Sinks
-    ]
-    for a, b, c, d in children:
-        cells.extend(build_full_recursive_cells(levels, a, b, c, d, depth + 1))
-    return cells
+    return {
+        "Quick Wins": (xmin, xmid, ymid, ymax),
+        "Major Projects": (xmid, xmax, ymid, ymax),
+        "Fill-Ins": (xmin, xmid, ymin, ymid),
+        "Time Sinks": (xmid, xmax, ymin, ymid),
+    }
 
 
-def get_leaf_bounds(x_score, y_score, levels):
-    xmin, xmax, ymin, ymax = 0.0, 1.0, 0.0, 1.0
-    path = []
-    for _ in range(levels):
-        xmid = (xmin + xmax) / 2.0
-        ymid = (ymin + ymax) / 2.0
-        if x_score <= xmid and y_score > ymid:
-            xmax = xmid
-            ymin = ymid
-            path.append("Quick Wins")
-        elif x_score > xmid and y_score > ymid:
-            xmin = xmid
-            ymin = ymid
-            path.append("Major Projects")
-        elif x_score <= xmid and y_score <= ymid:
-            xmax = xmid
-            ymax = ymid
-            path.append("Fill-Ins")
-        else:
-            xmin = xmid
-            ymax = ymid
-            path.append("Time Sinks")
-    return xmin, xmax, ymin, ymax, " > ".join(path)
+def recursive_partition(node_df, bounds, path, depth, max_depth, leaf_capacity, out_nodes):
+    node_record = {
+        "bounds": bounds,
+        "path": path,
+        "depth": depth,
+        "count": len(node_df),
+        "is_leaf": False,
+    }
+    out_nodes.append(node_record)
+
+    if len(node_df) == 0:
+        node_record["is_leaf"] = True
+        return
+
+    if len(node_df) <= leaf_capacity or depth >= max_depth:
+        node_record["is_leaf"] = True
+        node_record["df"] = node_df.copy()
+        return
+
+    x_split = float(node_df["Effort Score"].median())
+    y_split = float(node_df["Impact Score"].median())
+
+    child_boxes = split_bounds(bounds)
+    child_frames = {name: [] for name in child_boxes}
+
+    for _, row in node_df.iterrows():
+        qname = get_quadrant_for_scores(float(row["Effort Score"]), float(row["Impact Score"]), x_split, y_split)
+        child_frames[qname].append(row)
+
+    non_empty_children = 0
+    for qname, rows in child_frames.items():
+        if rows:
+            non_empty_children += 1
+            child_df = pd.DataFrame(rows)
+            recursive_partition(
+                child_df,
+                child_boxes[qname],
+                path + [qname],
+                depth + 1,
+                max_depth,
+                leaf_capacity,
+                out_nodes,
+            )
+
+    if non_empty_children <= 1:
+        node_record["is_leaf"] = True
+        node_record["df"] = node_df.copy()
 
 
-def assign_positions_by_leaf(df, levels):
-    temp = df.copy()
-    leaf_info = temp.apply(
-        lambda row: get_leaf_bounds(float(row["Effort Score"]), float(row["Impact Score"]), levels),
-        axis=1,
-        result_type="expand",
+def build_recursive_layout(df):
+    root_bounds = (0.0, 1.0, 0.0, 1.0)
+    nodes = []
+    recursive_partition(
+        df.sort_values(["Impact Score", "Effort Score", "Step"], ascending=[False, True, True]).reset_index(drop=True),
+        root_bounds,
+        [],
+        0,
+        MAX_RECURSION_DEPTH,
+        AUTO_LEAF_CAPACITY,
+        nodes,
     )
-    leaf_info.columns = ["Leaf XMin", "Leaf XMax", "Leaf YMin", "Leaf YMax", "Recursive Path"]
-    temp = pd.concat([temp, leaf_info], axis=1)
 
-    grouped = []
-    for _, group in temp.groupby(["Leaf XMin", "Leaf XMax", "Leaf YMin", "Leaf YMax"], sort=False):
-        group = group.sort_values(["Impact Score", "Effort Score", "Step"], ascending=[False, True, True]).reset_index(drop=True)
+    leaves = [n for n in nodes if n.get("is_leaf") and "df" in n]
+    positioned = []
+    for leaf in leaves:
+        group = leaf["df"].copy().sort_values(["Impact Score", "Effort Score", "Step"], ascending=[False, True, True]).reset_index(drop=True)
+        xmin, xmax, ymin, ymax = leaf["bounds"]
         n = len(group)
-        cols = math.ceil(math.sqrt(n))
-        rows = math.ceil(n / cols)
+        cols = max(1, math.ceil(math.sqrt(n)))
+        rows = max(1, math.ceil(n / cols))
 
-        xmin = float(group["Leaf XMin"].iloc[0])
-        xmax = float(group["Leaf XMax"].iloc[0])
-        ymin = float(group["Leaf YMin"].iloc[0])
-        ymax = float(group["Leaf YMax"].iloc[0])
-
-        pad_x = (xmax - xmin) * 0.14
-        pad_y = (ymax - ymin) * 0.14
+        pad_x = max(0.006, (xmax - xmin) * 0.12)
+        pad_y = max(0.006, (ymax - ymin) * 0.12)
         ux0, ux1 = xmin + pad_x, xmax - pad_x
         uy0, uy1 = ymin + pad_y, ymax - pad_y
 
-        xs = []
-        ys = []
+        xs, ys = [], []
         for i in range(n):
             r = i // cols
             c = i % cols
@@ -419,35 +455,48 @@ def assign_positions_by_leaf(df, levels):
 
         group["x"] = xs
         group["y"] = ys
-        group["Cell Width"] = xmax - xmin
-        group["Cell Height"] = ymax - ymin
-        group["Recursive Level"] = levels
-        grouped.append(group)
+        group["Leaf XMin"] = xmin
+        group["Leaf XMax"] = xmax
+        group["Leaf YMin"] = ymin
+        group["Leaf YMax"] = ymax
+        group["Recursive Path"] = " > ".join(leaf["path"]) if leaf["path"] else "Root"
+        group["Recursive Level"] = leaf["depth"]
+        positioned.append(group)
 
-    return pd.concat(grouped, ignore_index=True) if grouped else temp
-
-
-def marker_size_from_levels(levels):
-    if levels >= 4:
-        return 16
-    if levels == 3:
-        return 20
-    return 24
+    plot_df = pd.concat(positioned, ignore_index=True) if positioned else df.copy()
+    return plot_df, nodes
 
 
-def draw_recursive_grid(fig, levels):
-    cells = build_full_recursive_cells(levels)
-    for cell in cells:
-        if cell["depth"] == 0:
+def marker_size_from_plot(plot_df):
+    if plot_df.empty:
+        return 18
+    smallest = min(
+        (plot_df["Leaf XMax"] - plot_df["Leaf XMin"]).min(),
+        (plot_df["Leaf YMax"] - plot_df["Leaf YMin"]).min(),
+    )
+    if smallest <= 0.03:
+        return 11
+    if smallest <= 0.05:
+        return 13
+    if smallest <= 0.08:
+        return 15
+    return 18
+
+
+def draw_recursive_grid(fig, nodes):
+    for node in nodes:
+        if node["depth"] == 0:
             continue
-        fill_alpha = min(0.025 + 0.012 * cell["depth"], 0.08)
+        xmin, xmax, ymin, ymax = node["bounds"]
+        line_width = 1.8 if node["depth"] == 1 else 1.0
+        fill_alpha = min(0.02 + 0.01 * node["depth"], 0.06)
         fig.add_shape(
             type="rect",
-            x0=cell["xmin"],
-            x1=cell["xmax"],
-            y0=cell["ymin"],
-            y1=cell["ymax"],
-            line=dict(color=CELL_LINE, width=1),
+            x0=xmin,
+            x1=xmax,
+            y0=ymin,
+            y1=ymax,
+            line=dict(color=CELL_LINE, width=line_width),
             fillcolor=f"rgba(68, 95, 127, {fill_alpha:.3f})",
             layer="below",
         )
@@ -465,12 +514,11 @@ def make_impact_effort_matrix(df, selected_step=None):
     df["Lean / Six Sigma Logic"] = df.apply(build_logic_text, axis=1)
     df = compute_continuous_scores(df.sort_values("Step").reset_index(drop=True))
 
-    levels = auto_levels(len(df))
-    plot_df = assign_positions_by_leaf(df, levels)
-    marker_size = marker_size_from_levels(levels)
+    plot_df, nodes = build_recursive_layout(df)
+    marker_size = marker_size_from_plot(plot_df)
 
     fig = go.Figure()
-    draw_recursive_grid(fig, levels)
+    draw_recursive_grid(fig, nodes)
 
     for quadrant, color in QUADRANT_COLORS.items():
         temp = plot_df[plot_df["Quadrant"] == quadrant].copy().reset_index(drop=True)
@@ -488,7 +536,7 @@ def make_impact_effort_matrix(df, selected_step=None):
                 mode="markers+text",
                 text=temp["Step"].astype(str),
                 textposition="middle center",
-                textfont=dict(size=max(8, marker_size - 8), color="black"),
+                textfont=dict(size=max(7, marker_size - 6), color="black"),
                 marker=dict(size=marker_size, color="rgba(255,255,255,0)", line=dict(color=color, width=2)),
                 customdata=temp[[
                     "Step", "Description", "Activity", "Therblig / Motion Type", "Motion Class",
@@ -507,14 +555,14 @@ def make_impact_effort_matrix(df, selected_step=None):
                 ),
                 hoverlabel=dict(bgcolor="white", bordercolor="black", font=dict(color="black", size=12)),
                 selectedpoints=selected_points,
-                selected=dict(marker=dict(size=marker_size + 6, color="black", opacity=1.0)),
-                unselected=dict(marker=dict(opacity=0.70)),
+                selected=dict(marker=dict(size=marker_size + 5, color="black", opacity=1.0)),
+                unselected=dict(marker=dict(opacity=0.78)),
                 showlegend=False,
             )
         )
 
-    fig.add_shape(type="line", x0=0.5, x1=0.5, y0=0.0, y1=1.0, line=dict(color="gray", dash="dash", width=1.6))
-    fig.add_shape(type="line", x0=0.0, x1=1.0, y0=0.5, y1=0.5, line=dict(color="gray", dash="dash", width=1.6))
+    fig.add_shape(type="line", x0=0.5, x1=0.5, y0=0.0, y1=1.0, line=dict(color="gray", dash="dash", width=1.8))
+    fig.add_shape(type="line", x0=0.0, x1=1.0, y0=0.5, y1=0.5, line=dict(color="gray", dash="dash", width=1.8))
 
     fig.update_layout(
         xaxis=dict(range=[0, 1], visible=False, fixedrange=True),
@@ -578,7 +626,7 @@ st.markdown(
 - **Impact** is driven mainly by whether the motion is an **effective therblig** or an **ineffective/non-value-added therblig**.
 - **Effort** is scored separately using duration, motion waste, repeated walking/searching/inspection, and resource involvement.
 - Each activity is converted into a continuous **Impact Score** and **Effort Score** between 0 and 1.
-- The whole matrix is then recursively divided into **Quick Wins, Major Projects, Fill-Ins, and Time Sinks**, so the nested grid is visible across the full chart.
+- The matrix is then **adaptively subdivided**: dense areas split again into Quick Wins, Major Projects, Fill-Ins, and Time Sinks so heavily populated regions become visible instead of collapsing into one crowded corner.
 """
 )
 
