@@ -11,10 +11,8 @@ st.set_page_config(page_title="Impact vs Effort", layout="wide")
 st.title("Recursive Impact vs Effort Matrix")
 
 BOTTOM_NOTE = (
-    "This view recursively subdivides each occupied quadrant using the activities inside that quadrant only. "
-    "So after an activity first lands in Quick Wins, Major Projects, Fill-Ins, or Time Sinks, it is evaluated "
-    "again relative to the other activities in that same parent quadrant and placed into a second-level 2×2 split, "
-    "then again for deeper levels until each final box is small enough to show clearly."
+    "This view recursively subdivides each populated quadrant into Quick Wins, Major Projects, Fill-Ins, and Time Sinks again and again. "
+    "Each child split is evaluated only against the activities inside its own parent quadrant, so the chart shows local priority structure within every quadrant."
 )
 
 QUADRANT_COLORS = {
@@ -32,8 +30,7 @@ CHILD_FILL = {
 }
 PLOT_BG = "#dcdcdc"
 CELL_LINE = "rgba(65, 105, 155, 0.85)"
-MAX_DEPTH = 5
-LEAF_CAPACITY = 6
+MAX_DEPTH = 4
 POINT_SIZE = 22
 
 
@@ -354,17 +351,7 @@ def recursive_partition(node_df: pd.DataFrame, bounds: Tuple[float, float, float
     if node_df.empty:
         return
 
-    if len(node_df) <= LEAF_CAPACITY or depth >= MAX_DEPTH:
-        leaves.append({"df": node_df.copy(), "bounds": bounds, "path": path[:]})
-        return
-
     child_groups, x_split, y_split = assign_local_quadrants(node_df)
-
-    # If all activities still collapse into one child, stop recursion to avoid a visually useless chain.
-    non_empty_counts = sum(1 for q in QUADRANT_ORDER if not child_groups[q].empty)
-    if non_empty_counts <= 1:
-        leaves.append({"df": node_df.copy(), "bounds": bounds, "path": path[:]})
-        return
 
     split_rects.append({
         "bounds": bounds,
@@ -374,10 +361,21 @@ def recursive_partition(node_df: pd.DataFrame, bounds: Tuple[float, float, float
         "y_split": y_split,
     })
 
+    if depth >= MAX_DEPTH:
+        leaves.append({"df": node_df.copy(), "bounds": bounds, "path": path[:]})
+        return
+
+    non_empty_children = []
     for quad in QUADRANT_ORDER:
         quad_df = child_groups[quad]
-        if quad_df.empty:
-            continue
+        if not quad_df.empty:
+            non_empty_children.append((quad, quad_df))
+
+    if len(non_empty_children) <= 1:
+        leaves.append({"df": node_df.copy(), "bounds": bounds, "path": path[:]})
+        return
+
+    for quad, quad_df in non_empty_children:
         recursive_partition(
             quad_df,
             child_bounds(bounds, quad),
@@ -494,19 +492,13 @@ def add_activity_traces(fig: go.Figure, plot_df: pd.DataFrame, selected_step=Non
                 textfont=dict(size=9, color="black"),
                 marker=dict(size=POINT_SIZE, color="rgba(255,255,255,0)", line=dict(color=QUADRANT_COLORS[quad], width=2)),
                 customdata=temp[[
-                    "Step", "Description", "Activity", "Therblig / Motion Type", "Motion Class",
-                    "Impact Score", "Effort Score", "Recursive Path", "Quadrant"
+                    "Step", "Description", "Activity", "Therblig / Motion Type"
                 ]].values,
                 hovertemplate=(
                     "Step: %{customdata[0]}"
                     "<br>Description: %{customdata[1]}"
                     "<br>Activity: %{customdata[2]}"
                     "<br>Therblig: %{customdata[3]}"
-                    "<br>Motion Class: %{customdata[4]}"
-                    "<br>Impact Score: %{customdata[5]:.3f}"
-                    "<br>Effort Score: %{customdata[6]:.3f}"
-                    "<br>Recursive Path: %{customdata[7]}"
-                    "<br>Top-Level Quadrant: %{customdata[8]}"
                     "<extra></extra>"
                 ),
                 selectedpoints=selected_points,
@@ -620,8 +612,8 @@ st.markdown(
 
 - The first split classifies activities into **Quick Wins, Major Projects, Fill-Ins, and Time Sinks**.
 - Inside each occupied quadrant, the activities in that quadrant are split **again** into a local 2×2 matrix using only that quadrant's own activities.
-- The same logic repeats until the final boxes are small enough to display clearly.
-- This lets you see, for example, which activities inside **Major Projects** are the more urgent local quick wins versus the lower-value local time sinks.
+- The same logic repeats level by level inside each populated quadrant.
+- This lets you see, for example, which activities inside **Major Projects** become local quick wins, local fill-ins, local major projects, or local time sinks.
 """
 )
 
