@@ -1,6 +1,7 @@
 import io
 import math
 import re
+from collections import defaultdict
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -10,25 +11,28 @@ st.set_page_config(page_title="Impact vs Effort", layout="wide")
 st.title("Recursive Impact vs Effort Matrix")
 
 BOTTOM_NOTE = (
-    "This recursive matrix keeps the same Lean logic as the original impact–effort view, "
-    "but instead of placing all activities into only one flat 2×2 matrix, each quadrant is "
-    "subdivided again into Quick Wins, Major Projects, Fill-Ins, and Time Sinks. This allows "
-    "activities to be positioned more precisely within the same impact-versus-effort concept. "
-    "The recursive boxes are driven by continuous impact and effort scores derived from therblig "
-    "classification, Lean waste logic, duration, and resource complexity."
+    "This view keeps the original Lean impact–effort logic, but it lays the activities inside a "
+    "recursive 2×2 structure. The full matrix is first divided into Quick Wins, Major Projects, "
+    "Fill-Ins, and Time Sinks. Then each of those quadrants is divided again using the same "
+    "impact-versus-effort split, and so on. Activities are therefore positioned inside nested "
+    "sub-quadrants instead of being dumped into only one large box."
 )
 
 QUADRANT_COLORS = {
-    "Quick Wins": "#1b9e9a",
-    "Major Projects": "#6c63ff",
-    "Fill-Ins": "#3b82f6",
+    "Quick Wins": "#0f9d9a",
+    "Major Projects": "#635bff",
+    "Fill-Ins": "#2f78ff",
     "Time Sinks": "#ff4d6d",
 }
 
-CELL_FILL = "rgba(68, 95, 127, 0.12)"
-CELL_LINE = "rgba(80, 110, 145, 0.65)"
+CELL_LINE = "rgba(95, 120, 150, 0.72)"
+CELL_FILL = "rgba(68, 95, 127, 0.08)"
+PLOT_BG = "#dcdcdc"
 
 
+# -------------------------
+# Workbook loading helpers
+# -------------------------
 def require_upload():
     if "excel_file_bytes" not in st.session_state or "sheet_name" not in st.session_state:
         st.warning("Please upload the Excel file first on the Home page.")
@@ -124,15 +128,17 @@ def load_full_data(file_bytes, sheet_name):
     return df.reset_index(drop=True)
 
 
+# -------------------------
+# Lean / therblig logic
+# -------------------------
 NON_VALUE_ACTIVITY_TEXT = {
     "T": "Transport is non-value-added unless it directly supports transformation.",
-    "M": "Handling/motion is non-value-added when it is walking, repositioning, searching, or other extra motion.",
+    "M": "Handling or motion is non-value-added when it is walking, repositioning, searching, or extra motion.",
     "I": "Inspection is generally non-value-added from the customer perspective.",
-    "W": "Waiting/delay is a classic Lean waste.",
+    "W": "Waiting or delay is a classic Lean waste.",
     "S": "Storage represents inventory waste.",
-    "D": "Decision/planning does not directly transform the product.",
+    "D": "Decision or planning does not directly transform the product.",
 }
-
 
 THERBLIG_IMPACT_ADJUST = {
     "Search": -0.18,
@@ -154,7 +160,6 @@ THERBLIG_IMPACT_ADJUST = {
     "Unclassified": -0.05,
 }
 
-
 THERBLIG_EFFORT_ADJUST = {
     "Search": 0.20,
     "Delay": 0.20,
@@ -175,7 +180,6 @@ THERBLIG_EFFORT_ADJUST = {
     "Unclassified": 0.05,
 }
 
-
 LOW_IMPACT_THERBLIGS = {
     "Search", "Delay", "Walk/Transport Empty", "Reorient/Extra Motion", "Reposition/Relocate",
     "Position", "Hold", "Inspect/Check", "Plan/Decision", "Non-Value Motion"
@@ -189,15 +193,12 @@ def classify_therblig(desc, activity, activity_type):
         if matches_any(text, [r"\bsearch\b", r"\blook for\b", r"\bfind\b", r"\blocate\b"]):
             return "Search", "Ineffective"
         return "Delay", "Ineffective"
-
     if activity == "I":
         return "Inspect/Check", "Ineffective"
-
     if activity == "D":
-        if matches_any(text, [r"\bdecide\b", r"\bplan\b", r"\breact\b", r"\bcomplain\b", r"\bdetermine\b"]):
+        if matches_any(text, [r"\bdecide\b", r"\bplan\b", r"\breact\b", r"\bdetermine\b"]):
             return "Plan/Decision", "Ineffective"
         return "Non-Value Motion", "Ineffective"
-
     if activity == "S":
         return "Position", "Ineffective"
 
@@ -241,18 +242,11 @@ def classify_therblig(desc, activity, activity_type):
 
 
 def classify_impact(row):
-    activity = row["Activity"]
-    activity_type = row["Activity Type"]
-    therblig = row["Therblig / Motion Type"]
-    motion_class = row["Motion Class"]
-
-    if activity in {"I", "W", "S", "D"}:
+    if row["Activity"] in {"I", "W", "S", "D"}:
         return "Low"
-    if therblig in LOW_IMPACT_THERBLIGS:
+    if row["Therblig / Motion Type"] in LOW_IMPACT_THERBLIGS:
         return "Low"
-    if motion_class == "Effective":
-        return "High"
-    if activity_type == "VA":
+    if row["Motion Class"] == "Effective" or row["Activity Type"] == "VA":
         return "High"
     return "Low"
 
@@ -268,14 +262,10 @@ def classify_effort(row):
     if therblig in {"Inspect/Check", "Reorient/Extra Motion", "Non-Value Motion"} and duration >= 3:
         return "High"
     if therblig in {"Use", "Use / Disassemble", "Assemble", "Grasp", "Move", "Release Load / Pre-Position"}:
-        if duration >= 3:
-            return "High"
-        if duration >= 2 and res_count >= 4:
+        if duration >= 3 or (duration >= 2 and res_count >= 4):
             return "High"
         return "Low"
-    if duration >= 4:
-        return "High"
-    if duration >= 3 and activity in {"I", "D", "M", "T"}:
+    if duration >= 4 or (duration >= 3 and activity in {"I", "D", "M", "T"}):
         return "High"
     return "Low"
 
@@ -292,7 +282,6 @@ def get_quadrant(row):
 
 def build_logic_text(row):
     reasons = []
-    activity = row["Activity"]
     therblig = row["Therblig / Motion Type"]
     duration = int(round(row["Duration Seconds"]))
 
@@ -300,8 +289,8 @@ def build_logic_text(row):
         reasons.append(f"{therblig} directly advances the work.")
     else:
         reasons.append(f"{therblig} is treated as non-value-added motion.")
-    if activity in NON_VALUE_ACTIVITY_TEXT:
-        reasons.append(NON_VALUE_ACTIVITY_TEXT[activity])
+    if row["Activity"] in NON_VALUE_ACTIVITY_TEXT:
+        reasons.append(NON_VALUE_ACTIVITY_TEXT[row["Activity"]])
     if duration >= 3:
         reasons.append(f"Duration={duration}s increases effort.")
     else:
@@ -323,156 +312,145 @@ def compute_continuous_scores(df):
 
     impact_base = df["Impact"].map({"High": 0.74, "Low": 0.26}).fillna(0.26)
     effort_base = df["Effort"].map({"High": 0.74, "Low": 0.26}).fillna(0.26)
-
     impact_adjust = df["Therblig / Motion Type"].map(THERBLIG_IMPACT_ADJUST).fillna(0.0)
     effort_adjust = df["Therblig / Motion Type"].map(THERBLIG_EFFORT_ADJUST).fillna(0.0)
-
     activity_type_adjust = df["Activity Type"].map({"VA": 0.08, "NNVA": -0.02, "NVA": -0.08}).fillna(0.0)
     motion_adjust = df["Motion Class"].map({"Effective": 0.05, "Ineffective": -0.05}).fillna(0.0)
 
     df["Impact Score"] = (
         impact_base + impact_adjust + activity_type_adjust + motion_adjust - 0.04 * duration_norm + 0.02 * resource_norm
     ).clip(0.02, 0.98)
-
     df["Effort Score"] = (
         effort_base + effort_adjust + 0.18 * duration_norm + 0.10 * resource_norm
     ).clip(0.02, 0.98)
-
     return df
 
 
-def choose_depth(n_points):
-    if n_points <= 16:
+# -------------------------
+# Recursive layout
+# -------------------------
+def auto_levels(n_points):
+    if n_points <= 20:
         return 2
-    if n_points <= 64:
+    if n_points <= 80:
         return 3
-    if n_points <= 180:
-        return 4
-    return 5
+    return 4
 
 
-def recursive_quadtree(df, xmin, xmax, ymin, ymax, depth, max_depth):
-    if df.empty:
-        return []
-    if depth >= max_depth or len(df) <= 3:
-        return [(df.copy(), xmin, xmax, ymin, ymax, depth)]
+def build_full_recursive_cells(levels, xmin=0.0, xmax=1.0, ymin=0.0, ymax=1.0, depth=0):
+    cells = [{"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax, "depth": depth}]
+    if depth >= levels:
+        return cells
 
     xmid = (xmin + xmax) / 2.0
     ymid = (ymin + ymax) / 2.0
-
-    q_quick = df[(df["Effort Score"] <= xmid) & (df["Impact Score"] > ymid)].copy()
-    q_major = df[(df["Effort Score"] > xmid) & (df["Impact Score"] > ymid)].copy()
-    q_fill = df[(df["Effort Score"] <= xmid) & (df["Impact Score"] <= ymid)].copy()
-    q_sink = df[(df["Effort Score"] > xmid) & (df["Impact Score"] <= ymid)].copy()
-
     children = [
-        (q_quick, xmin, xmid, ymid, ymax),
-        (q_major, xmid, xmax, ymid, ymax),
-        (q_fill, xmin, xmid, ymin, ymid),
-        (q_sink, xmid, xmax, ymin, ymid),
+        (xmin, xmid, ymid, ymax),  # Quick Wins
+        (xmid, xmax, ymid, ymax),  # Major Projects
+        (xmin, xmid, ymin, ymid),  # Fill-Ins
+        (xmid, xmax, ymin, ymid),  # Time Sinks
     ]
-
-    non_empty_children = [(child_df, a, b, c, d) for child_df, a, b, c, d in children if not child_df.empty]
-    if len(non_empty_children) <= 1:
-        return [(df.copy(), xmin, xmax, ymin, ymax, depth)]
-
-    leaves = []
-    for child_df, a, b, c, d in children:
-        if child_df.empty:
-            continue
-        leaves.extend(recursive_quadtree(child_df, a, b, c, d, depth + 1, max_depth))
-    return leaves
+    for a, b, c, d in children:
+        cells.extend(build_full_recursive_cells(levels, a, b, c, d, depth + 1))
+    return cells
 
 
-def assign_positions_in_cell(df, xmin, xmax, ymin, ymax):
-    df = df.sort_values(["Impact Score", "Effort Score", "Step"], ascending=[False, True, True]).reset_index(drop=True)
-    n = len(df)
-    if n == 0:
-        return df
-
-    cols = math.ceil(math.sqrt(n))
-    rows = math.ceil(n / cols)
-
-    pad_x = (xmax - xmin) * 0.12
-    pad_y = (ymax - ymin) * 0.12
-    usable_xmin = xmin + pad_x
-    usable_xmax = xmax - pad_x
-    usable_ymin = ymin + pad_y
-    usable_ymax = ymax - pad_y
-
-    if usable_xmax <= usable_xmin:
-        usable_xmin, usable_xmax = xmin, xmax
-    if usable_ymax <= usable_ymin:
-        usable_ymin, usable_ymax = ymin, ymax
-
-    xs, ys = [], []
-    for i in range(n):
-        r = i // cols
-        c = i % cols
-        x = usable_xmin + (c + 0.5) * (usable_xmax - usable_xmin) / cols
-        y = usable_ymax - (r + 0.5) * (usable_ymax - usable_ymin) / rows
-        xs.append(x)
-        ys.append(y)
-
-    df["x"] = xs
-    df["y"] = ys
-    df["Cell Width"] = xmax - xmin
-    df["Cell Height"] = ymax - ymin
-    return df
+def get_leaf_bounds(x_score, y_score, levels):
+    xmin, xmax, ymin, ymax = 0.0, 1.0, 0.0, 1.0
+    path = []
+    for _ in range(levels):
+        xmid = (xmin + xmax) / 2.0
+        ymid = (ymin + ymax) / 2.0
+        if x_score <= xmid and y_score > ymid:
+            xmax = xmid
+            ymin = ymid
+            path.append("Quick Wins")
+        elif x_score > xmid and y_score > ymid:
+            xmin = xmid
+            ymin = ymid
+            path.append("Major Projects")
+        elif x_score <= xmid and y_score <= ymid:
+            xmax = xmid
+            ymax = ymid
+            path.append("Fill-Ins")
+        else:
+            xmin = xmid
+            ymax = ymid
+            path.append("Time Sinks")
+    return xmin, xmax, ymin, ymax, " > ".join(path)
 
 
-def leaf_quadrant_name(x_center, y_center):
-    if y_center > 0.5 and x_center <= 0.5:
-        return "Quick Wins"
-    if y_center > 0.5 and x_center > 0.5:
-        return "Major Projects"
-    if y_center <= 0.5 and x_center <= 0.5:
-        return "Fill-Ins"
-    return "Time Sinks"
+def assign_positions_by_leaf(df, levels):
+    temp = df.copy()
+    leaf_info = temp.apply(
+        lambda row: get_leaf_bounds(float(row["Effort Score"]), float(row["Impact Score"]), levels),
+        axis=1,
+        result_type="expand",
+    )
+    leaf_info.columns = ["Leaf XMin", "Leaf XMax", "Leaf YMin", "Leaf YMax", "Recursive Path"]
+    temp = pd.concat([temp, leaf_info], axis=1)
+
+    grouped = []
+    for _, group in temp.groupby(["Leaf XMin", "Leaf XMax", "Leaf YMin", "Leaf YMax"], sort=False):
+        group = group.sort_values(["Impact Score", "Effort Score", "Step"], ascending=[False, True, True]).reset_index(drop=True)
+        n = len(group)
+        cols = math.ceil(math.sqrt(n))
+        rows = math.ceil(n / cols)
+
+        xmin = float(group["Leaf XMin"].iloc[0])
+        xmax = float(group["Leaf XMax"].iloc[0])
+        ymin = float(group["Leaf YMin"].iloc[0])
+        ymax = float(group["Leaf YMax"].iloc[0])
+
+        pad_x = (xmax - xmin) * 0.14
+        pad_y = (ymax - ymin) * 0.14
+        ux0, ux1 = xmin + pad_x, xmax - pad_x
+        uy0, uy1 = ymin + pad_y, ymax - pad_y
+
+        xs = []
+        ys = []
+        for i in range(n):
+            r = i // cols
+            c = i % cols
+            x = ux0 + (c + 0.5) * (ux1 - ux0) / cols
+            y = uy1 - (r + 0.5) * (uy1 - uy0) / rows
+            xs.append(x)
+            ys.append(y)
+
+        group["x"] = xs
+        group["y"] = ys
+        group["Cell Width"] = xmax - xmin
+        group["Cell Height"] = ymax - ymin
+        group["Recursive Level"] = levels
+        grouped.append(group)
+
+    return pd.concat(grouped, ignore_index=True) if grouped else temp
 
 
-def get_marker_size(plot_df):
-    if plot_df.empty:
-        return 24
-    min_span = min(plot_df["Cell Width"].min(), plot_df["Cell Height"].min())
-    if min_span <= 0.04:
+def marker_size_from_levels(levels):
+    if levels >= 4:
         return 16
-    if min_span <= 0.08:
+    if levels == 3:
         return 20
-    if min_span <= 0.14:
-        return 24
-    return 28
+    return 24
 
 
-def draw_recursive_cells(fig, leaves):
-    for _, xmin, xmax, ymin, ymax, depth in leaves:
-        opacity = min(0.05 + depth * 0.02, 0.16)
-        fill = f"rgba(68, 95, 127, {opacity:.3f})"
+def draw_recursive_grid(fig, levels):
+    cells = build_full_recursive_cells(levels)
+    for cell in cells:
+        if cell["depth"] == 0:
+            continue
+        fill_alpha = min(0.025 + 0.012 * cell["depth"], 0.08)
         fig.add_shape(
             type="rect",
-            x0=xmin,
-            x1=xmax,
-            y0=ymin,
-            y1=ymax,
+            x0=cell["xmin"],
+            x1=cell["xmax"],
+            y0=cell["ymin"],
+            y1=cell["ymax"],
             line=dict(color=CELL_LINE, width=1),
-            fillcolor=fill,
+            fillcolor=f"rgba(68, 95, 127, {fill_alpha:.3f})",
             layer="below",
         )
-
-
-def build_recursive_plot_df(df):
-    max_depth = choose_depth(len(df))
-    leaves = recursive_quadtree(df, 0.0, 1.0, 0.0, 1.0, depth=0, max_depth=max_depth)
-
-    parts = []
-    for leaf_df, xmin, xmax, ymin, ymax, depth in leaves:
-        temp = assign_positions_in_cell(leaf_df.copy(), xmin, xmax, ymin, ymax)
-        temp["Leaf Depth"] = depth
-        temp["Leaf Quadrant"] = leaf_quadrant_name((xmin + xmax) / 2.0, (ymin + ymax) / 2.0)
-        parts.append(temp)
-
-    plot_df = pd.concat(parts, ignore_index=True) if parts else df.copy()
-    return plot_df, leaves
 
 
 def make_impact_effort_matrix(df, selected_step=None):
@@ -487,11 +465,12 @@ def make_impact_effort_matrix(df, selected_step=None):
     df["Lean / Six Sigma Logic"] = df.apply(build_logic_text, axis=1)
     df = compute_continuous_scores(df.sort_values("Step").reset_index(drop=True))
 
-    plot_df, leaves = build_recursive_plot_df(df)
-    marker_size = get_marker_size(plot_df)
+    levels = auto_levels(len(df))
+    plot_df = assign_positions_by_leaf(df, levels)
+    marker_size = marker_size_from_levels(levels)
 
     fig = go.Figure()
-    draw_recursive_cells(fig, leaves)
+    draw_recursive_grid(fig, levels)
 
     for quadrant, color in QUADRANT_COLORS.items():
         temp = plot_df[plot_df["Quadrant"] == quadrant].copy().reset_index(drop=True)
@@ -509,17 +488,11 @@ def make_impact_effort_matrix(df, selected_step=None):
                 mode="markers+text",
                 text=temp["Step"].astype(str),
                 textposition="middle center",
-                textfont=dict(size=max(9, marker_size - 14), color="black"),
+                textfont=dict(size=max(8, marker_size - 8), color="black"),
                 marker=dict(size=marker_size, color="rgba(255,255,255,0)", line=dict(color=color, width=2)),
                 customdata=temp[[
-                    "Step",
-                    "Description",
-                    "Activity",
-                    "Therblig / Motion Type",
-                    "Motion Class",
-                    "Impact Score",
-                    "Effort Score",
-                    "Leaf Depth",
+                    "Step", "Description", "Activity", "Therblig / Motion Type", "Motion Class",
+                    "Impact Score", "Effort Score", "Recursive Path"
                 ]].values,
                 hovertemplate=(
                     "Step: %{customdata[0]}"
@@ -529,48 +502,49 @@ def make_impact_effort_matrix(df, selected_step=None):
                     "<br>Motion Class: %{customdata[4]}"
                     "<br>Impact Score: %{customdata[5]:.3f}"
                     "<br>Effort Score: %{customdata[6]:.3f}"
-                    "<br>Recursive Level: %{customdata[7]}"
+                    "<br>Recursive Path: %{customdata[7]}"
                     "<extra></extra>"
                 ),
                 hoverlabel=dict(bgcolor="white", bordercolor="black", font=dict(color="black", size=12)),
                 selectedpoints=selected_points,
                 selected=dict(marker=dict(size=marker_size + 6, color="black", opacity=1.0)),
-                unselected=dict(marker=dict(opacity=0.60)),
+                unselected=dict(marker=dict(opacity=0.70)),
                 showlegend=False,
             )
         )
 
-    fig.add_shape(type="line", x0=0.5, x1=0.5, y0=0.0, y1=1.0, line=dict(color="gray", dash="dash", width=1.5))
-    fig.add_shape(type="line", x0=0.0, x1=1.0, y0=0.5, y1=0.5, line=dict(color="gray", dash="dash", width=1.5))
-
-    annotations = [
-        dict(x=0.50, y=1.06, xref="paper", yref="paper", text="Recursive Impact vs Effort Matrix", showarrow=False, font=dict(size=22, color="black")),
-        dict(x=0.50, y=0.01, xref="paper", yref="paper", text="Effort", showarrow=False, font=dict(size=18, color="black")),
-        dict(x=0.01, y=0.50, xref="paper", yref="paper", text="Impact", showarrow=False, textangle=-90, font=dict(size=18, color="black")),
-        dict(x=0.26, y=0.96, xref="paper", yref="paper", text="Quick Wins", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Quick Wins"])),
-        dict(x=0.74, y=0.96, xref="paper", yref="paper", text="Major Projects", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Major Projects"])),
-        dict(x=0.26, y=0.09, xref="paper", yref="paper", text="Fill-Ins", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Fill-Ins"])),
-        dict(x=0.74, y=0.09, xref="paper", yref="paper", text="Time Sinks", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Time Sinks"])),
-        dict(x=0.05, y=0.24, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=13, color="black")),
-        dict(x=0.05, y=0.76, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=13, color="black")),
-        dict(x=0.24, y=0.05, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=13, color="black")),
-        dict(x=0.76, y=0.05, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=13, color="black")),
-    ]
+    fig.add_shape(type="line", x0=0.5, x1=0.5, y0=0.0, y1=1.0, line=dict(color="gray", dash="dash", width=1.6))
+    fig.add_shape(type="line", x0=0.0, x1=1.0, y0=0.5, y1=0.5, line=dict(color="gray", dash="dash", width=1.6))
 
     fig.update_layout(
         xaxis=dict(range=[0, 1], visible=False, fixedrange=True),
         yaxis=dict(range=[0, 1], visible=False, fixedrange=True, scaleanchor="x", scaleratio=1),
-        plot_bgcolor="#dcdcdc",
-        paper_bgcolor="#dcdcdc",
+        plot_bgcolor=PLOT_BG,
+        paper_bgcolor=PLOT_BG,
         height=940,
         margin=dict(l=70, r=30, t=70, b=60),
         clickmode="event+select",
         dragmode="select",
-        annotations=annotations,
+        annotations=[
+            dict(x=0.50, y=1.06, xref="paper", yref="paper", text="Recursive Impact vs Effort Matrix", showarrow=False, font=dict(size=22, color="black")),
+            dict(x=0.50, y=0.01, xref="paper", yref="paper", text="Effort", showarrow=False, font=dict(size=18, color="black")),
+            dict(x=0.01, y=0.50, xref="paper", yref="paper", text="Impact", showarrow=False, textangle=-90, font=dict(size=18, color="black")),
+            dict(x=0.25, y=0.96, xref="paper", yref="paper", text="Quick Wins", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Quick Wins"])),
+            dict(x=0.75, y=0.96, xref="paper", yref="paper", text="Major Projects", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Major Projects"])),
+            dict(x=0.25, y=0.09, xref="paper", yref="paper", text="Fill-Ins", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Fill-Ins"])),
+            dict(x=0.75, y=0.09, xref="paper", yref="paper", text="Time Sinks", showarrow=False, font=dict(size=14, color=QUADRANT_COLORS["Time Sinks"])),
+            dict(x=0.05, y=0.24, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=13, color="black")),
+            dict(x=0.05, y=0.76, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=13, color="black")),
+            dict(x=0.24, y=0.05, xref="paper", yref="paper", text="Low", showarrow=False, font=dict(size=13, color="black")),
+            dict(x=0.76, y=0.05, xref="paper", yref="paper", text="High", showarrow=False, font=dict(size=13, color="black")),
+        ],
     )
     return fig, plot_df
 
 
+# -------------------------
+# Table helpers
+# -------------------------
 def style_logic_table(df, selected_step=None):
     def highlight_row(row):
         if selected_step is not None and int(row["Step"]) == int(selected_step):
@@ -604,8 +578,7 @@ st.markdown(
 - **Impact** is driven mainly by whether the motion is an **effective therblig** or an **ineffective/non-value-added therblig**.
 - **Effort** is scored separately using duration, motion waste, repeated walking/searching/inspection, and resource involvement.
 - Each activity is converted into a continuous **Impact Score** and **Effort Score** between 0 and 1.
-- The full matrix is then recursively divided into **Quick Wins, Major Projects, Fill-Ins, and Time Sinks**, and each resulting quadrant is divided again using the same logic.
-- The chart therefore stays faithful to the original 2×2 impact–effort idea, but it places activities more precisely inside nested sub-quadrants.
+- The whole matrix is then recursively divided into **Quick Wins, Major Projects, Fill-Ins, and Time Sinks**, so the nested grid is visible across the full chart.
 """
 )
 
@@ -616,9 +589,7 @@ try:
     if "impact_effort_selected_step" not in st.session_state:
         st.session_state["impact_effort_selected_step"] = None
 
-    fig, table_df = make_impact_effort_matrix(
-        df, selected_step=st.session_state["impact_effort_selected_step"]
-    )
+    fig, table_df = make_impact_effort_matrix(df, selected_step=st.session_state["impact_effort_selected_step"])
 
     chart_event = st.plotly_chart(
         fig,
@@ -650,17 +621,9 @@ try:
 
     filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 1.2])
     with filter_col1:
-        impact_filter = st.multiselect(
-            "Filter Impact",
-            options=["Low", "High"],
-            default=["Low", "High"],
-        )
+        impact_filter = st.multiselect("Filter Impact", options=["Low", "High"], default=["Low", "High"])
     with filter_col2:
-        effort_filter = st.multiselect(
-            "Filter Effort",
-            options=["Low", "High"],
-            default=["Low", "High"],
-        )
+        effort_filter = st.multiselect("Filter Effort", options=["Low", "High"], default=["Low", "High"])
     with filter_col3:
         if st.button("Clear marker selection", use_container_width=True):
             st.session_state["impact_effort_selected_step"] = None
@@ -668,26 +631,15 @@ try:
 
     display_df = table_df.copy()
     display_df = display_df[
-        display_df["Impact"].isin(impact_filter) &
-        display_df["Effort"].isin(effort_filter)
+        display_df["Impact"].isin(impact_filter) & display_df["Effort"].isin(effort_filter)
     ].copy()
-
     display_df = display_df.sort_values(["Step", "Impact", "Effort"]).reset_index(drop=True)
     display_df["Duration"] = display_df["Duration Seconds"].round(0).astype(int).astype(str) + " s"
 
     table_cols = [
-        "Step",
-        "Description",
-        "Activity",
-        "Therblig / Motion Type",
-        "Motion Class",
-        "Impact",
-        "Effort",
-        "Quadrant",
-        "Impact Score",
-        "Effort Score",
-        "Duration",
-        "Lean / Six Sigma Logic",
+        "Step", "Description", "Activity", "Therblig / Motion Type", "Motion Class",
+        "Impact", "Effort", "Quadrant", "Impact Score", "Effort Score", "Recursive Path",
+        "Duration", "Lean / Six Sigma Logic",
     ]
     display_df = display_df[table_cols].rename(columns={
         "Therblig / Motion Type": "Therblig",
