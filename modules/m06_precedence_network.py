@@ -8,6 +8,18 @@ import pandas as pd
 from .m01_workbook_loader import Task
 
 
+def _safe_transitive_reduction(graph: nx.DiGraph) -> nx.DiGraph:
+    """Return a transitive reduction for display while preserving node attributes."""
+    try:
+        reduced = nx.transitive_reduction(graph)
+        out = nx.DiGraph()
+        out.add_nodes_from(graph.nodes(data=True))
+        out.add_edges_from(reduced.edges())
+        return out
+    except Exception:
+        return graph.copy()
+
+
 def build_precedence_outputs(tasks: List[Task]) -> Dict[str, object]:
     graph = nx.DiGraph()
     for task in tasks:
@@ -16,8 +28,8 @@ def build_precedence_outputs(tasks: List[Task]) -> Dict[str, object]:
             name=task.name,
             duration_sec=task.duration_sec,
             resources=task.resources,
-            stage_group=task.stage_group,
-            action_family=task.action_family,
+            stage_group=getattr(task, 'stage_group', 'other'),
+            action_family=getattr(task, 'action_family', 'other'),
         )
 
     ids = {task.task_id for task in tasks}
@@ -25,7 +37,8 @@ def build_precedence_outputs(tasks: List[Task]) -> Dict[str, object]:
         for pred in task.predecessors:
             if pred not in ids:
                 raise ValueError(f"Predecessor {pred} is not present in task list.")
-            graph.add_edge(pred, task.task_id)
+            if pred != task.task_id:
+                graph.add_edge(pred, task.task_id)
 
     if not nx.is_directed_acyclic_graph(graph):
         raise ValueError("Precedence network is not a DAG.")
@@ -33,7 +46,7 @@ def build_precedence_outputs(tasks: List[Task]) -> Dict[str, object]:
     topo = list(nx.topological_sort(graph))
     longest = {n: 0 for n in topo}
     parent = {n: None for n in topo}
-    durations = {task.task_id: task.duration_sec for task in tasks}
+    durations = {task.task_id: max(int(task.duration_sec), 1) for task in tasks}
 
     for node in topo:
         for succ in graph.successors(node):
@@ -49,7 +62,15 @@ def build_precedence_outputs(tasks: List[Task]) -> Dict[str, object]:
         end_node = parent[end_node]
     critical_path = list(reversed(critical_path))
 
-    tech = pd.DataFrame([{"predecessor": u, "successor": v} for u, v in graph.edges()])
+    reduced_graph = _safe_transitive_reduction(graph)
+    reduced_edges = set(reduced_graph.edges())
+    cp_edge_pairs = [
+        (u, v) for u, v in zip(critical_path[:-1], critical_path[1:]) if (u, v) in reduced_edges
+    ]
+
+    tech = pd.DataFrame([{"predecessor": u, "successor": v} for u, v in graph.edges()]).sort_values(["predecessor", "successor"]).reset_index(drop=True)
+    reduced_tech = pd.DataFrame([{"predecessor": u, "successor": v} for u, v in reduced_graph.edges()]).sort_values(["predecessor", "successor"]).reset_index(drop=True)
+
     conflicts = []
     parallel = []
     for i, task_a in enumerate(tasks):
@@ -63,8 +84,11 @@ def build_precedence_outputs(tasks: List[Task]) -> Dict[str, object]:
 
     return {
         "graph": graph,
+        "display_graph": reduced_graph,
         "technological_precedence": tech,
+        "display_precedence": reduced_tech,
         "resource_linked_conflicts": pd.DataFrame(conflicts),
         "parallelizable_tasks": pd.DataFrame(parallel),
         "critical_path_task_ids": critical_path,
+        "critical_path_display_edges": cp_edge_pairs,
     }
