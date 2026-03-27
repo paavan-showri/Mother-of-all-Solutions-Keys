@@ -693,3 +693,154 @@ try:
         st.caption("Click an activity marker to highlight its matching row in the table.")
 except Exception as e:
     st.error(f"Error: {e}")
+
+def render_step_by_step_explanation():
+    st.markdown("### Technical explanation of the recursive Impact–Effort model")
+
+    st.markdown(
+    """
+This chart is constructed using a **recursive local 2D partitioning model** that integrates Lean logic, continuous scoring, median-based recursive splitting, and quadtree geometry.
+
+---
+
+### 1. Data → Feature representation
+
+Each process step *i* is represented as:
+
+xᵢ = (description, activity, activity type, duration, resources, therblig, motion class)
+
+This converts raw process observations into structured features.
+
+---
+
+### 2. Lean rule-based scoring function
+
+A mapping function is applied:
+
+f(xᵢ) → (eᵢ, mᵢ)
+
+where:
+- eᵢ = Effort Score  
+- mᵢ = Impact Score  
+
+This mapping encodes:
+- Value-added vs non-value-added logic  
+- Therblig classification (effective vs ineffective motion)  
+- Lean waste categories (motion, waiting, transport, inspection, etc.)
+
+---
+
+### 3. Continuous 2D embedding
+
+Each activity is embedded into a continuous space:
+
+pᵢ = (eᵢ, mᵢ) ∈ [0,1]²
+
+This transforms discrete Lean judgments into a **continuous decision surface**, enabling fine-grained prioritization.
+
+---
+
+### 4. Global quadrant partition (Level 0)
+
+The space is first divided into four regions:
+
+- Quick Wins → high impact, low effort  
+- Major Projects → high impact, high effort  
+- Fill-Ins → low impact, low effort  
+- Time Sinks → low impact, high effort  
+
+---
+
+### 5. Local recursive partitioning (core idea)
+
+For each populated region R:
+
+R = {{pᵢ ∈ region}}
+
+Compute local medians:
+
+e* = median(eᵢ ∈ R)  
+m* = median(mᵢ ∈ R)
+
+Then split R into four subregions:
+
+- Quick Wins: eᵢ ≤ e*, mᵢ > m*  
+- Major Projects: eᵢ > e*, mᵢ > m*  
+- Fill-Ins: eᵢ ≤ e*, mᵢ ≤ m*  
+- Time Sinks: eᵢ > e*, mᵢ ≤ m*  
+
+This creates a **local adaptive split**, not a fixed global threshold.
+
+---
+
+### 6. Recursive structure
+
+The same process is repeated inside each populated quadrant:
+
+R → {{R₁, R₂, R₃, R₄}}
+
+Each child node is again split using its own local medians.
+
+This continues until:
+- |R| ≤ 1 (single activity), or  
+- the split does not meaningfully separate the data  
+
+---
+
+### 7. Quadtree geometry
+
+The recursive splitting forms a quadtree:
+
+- level 0 → 1 region  
+- level 1 → 4 regions  
+- level 2 → 4² = 16 regions  
+- level 3 → 4³ = 64 regions  
+
+Number of regions at depth d:
+
+N(d) = 4ᵈ
+
+Total regions:
+
+1 + 4 + 4² + ... + 4ᵈ = (4^(d+1) − 1) / 3
+
+---
+
+### 8. Final spatial placement
+
+Each activity belongs to a **leaf node** of the quadtree.
+
+Within each leaf region:
+- activities are arranged in a structured grid  
+- overlap is avoided  
+- quadrant boundaries remain visually clear  
+
+---
+
+### 9. Interpretation
+
+This model allows:
+
+- global prioritization (top-level quadrants)  
+- local prioritization (within each quadrant)  
+- hierarchical decision-making  
+
+Example:  
+A step in **Major Projects** can become a **local Quick Win inside Major Projects**.
+
+---
+
+### 10. Model summary
+
+Activity data  
+→ Lean rule-based scoring  
+→ (Effort Score, Impact Score)  
+→ recursive local median partitioning  
+→ quadtree spatial structure  
+→ final Impact–Effort visualization  
+
+---
+
+This makes the chart a **quadtree-based recursive decision model**, not just a standard 2×2 matrix.
+"""
+    )
